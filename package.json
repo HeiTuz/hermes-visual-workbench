@@ -1,0 +1,39 @@
+{
+  "name": "hermes-visual-workbench",
+  "version": "0.1.0",
+  "description": "Independent Browser and task-aware QC panes for Hermes Desktop",
+  "type": "module",
+  "bin": {
+    "hermes-visual-workbench": "scripts/install.mjs"
+  },
+  "files": [
+    "plugin.js",
+    "manifest.json",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --check plugin.js && node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HeiTuz/hermes-visual-workbench.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HeiTuz/hermes-visual-workbench/issues"
+  },
+  "homepage": "https://github.com/HeiTuz/hermes-visual-workbench#readme",
+  "keywords": [
+    "hermes-agent",
+    "hermes-desktop",
+    "browser",
+    "quality-control",
+    "plugin"
+  ],
+  "author": "HeiTuz",
+  "license": "MIT"
+}

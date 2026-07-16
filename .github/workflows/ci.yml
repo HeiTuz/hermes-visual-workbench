@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: oven-sh/setup-bun@v2
+      - run: npm test
+      - name: Pack and smoke npm runner
+        shell: bash
+        run: |
+          tarball=$(npm pack --silent)
+          npx --yes "./$tarball" -- --target "$RUNNER_TEMP/npx-plugin"
+          test -f "$RUNNER_TEMP/npx-plugin/plugin.js"
+      - name: Smoke Bun runner
+        shell: bash
+        run: |
+          tarball=$(ls hermes-visual-workbench-*.tgz | head -1)
+          bunx --package "$GITHUB_WORKSPACE/$tarball" hermes-visual-workbench --target "$RUNNER_TEMP/bun-plugin"
+          test -f "$RUNNER_TEMP/bun-plugin/plugin.js"

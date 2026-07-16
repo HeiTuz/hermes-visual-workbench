@@ -1,0 +1,13 @@
+{
+  "id": "visual-workbench",
+  "name": "Visual Workbench",
+  "version": "0.1.0",
+  "entry": "plugin.js",
+  "fullHostCapabilities": [
+    "chat.imageActions",
+    "titleBar.appControls",
+    "host.panes",
+    "electron.browser.capture"
+  ],
+  "corePullRequest": "https://github.com/NousResearch/hermes-agent/pull/65647"
+}

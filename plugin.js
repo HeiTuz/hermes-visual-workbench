@@ -696,6 +696,30 @@ function BrowserPanel({ panelId, title }) {
   })
 }
 
+function AutomationTargetBadge() {
+  const pinned = Boolean(window.hermesDesktop?.browser?.capture)
+  return jsxs('div', {
+    'aria-label': 'Automation target',
+    role: 'status',
+    style: {
+      alignItems: 'center',
+      color: pinned ? 'var(--ui-text-tertiary)' : 'var(--ui-text-quaternary)',
+      display: 'flex',
+      fontSize: 10,
+      gap: 5,
+      padding: '0 12px 8px'
+    },
+    children: [
+      jsx(Codicon, { name: pinned ? 'verified' : 'circle-slash' }),
+      jsx('span', {
+        children: pinned
+          ? 'Automation target · Hermes internal Browser pane · persist:hermes-browser'
+          : 'Automation target unavailable · iframe fallback — agents stop as internal_browser_unavailable'
+      })
+    ]
+  })
+}
+
 function BrowserPane() {
   const workbench = useWorkbench()
   return jsxs('div', {
@@ -707,6 +731,7 @@ function BrowserPane() {
           ? 'Independent result/reference viewports · secure persistent webview session'
           : 'Independent result/reference viewports · portable iframe mode'
       }),
+      jsx(AutomationTargetBadge, {}),
       jsxs('div', {
         style: { display: 'flex', gap: 6, padding: '0 12px 10px' },
         children: [

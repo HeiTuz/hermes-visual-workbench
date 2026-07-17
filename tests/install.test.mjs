@@ -182,6 +182,7 @@ test('pins Midjourney automation to the Hermes internal Browser pane', () => {
   assert.match(sourceSkill, /app="Hermes"/)
   assert.match(sourceSkill, /Never use `browser_navigate`, any `browser_\*` tool/)
   assert.match(sourceSkill, /Chrome, Safari, Arc, Brave, or Edge/)
-  assert.match(sourceSkill, /internal_browser_unavailable/)
+  assert.match(sourceSkill, /internal_pane_unavailable/)
+  assert.doesNotMatch(sourceSkill, /internal_browser_unavailable/)
   assert.match(sourceSkill, /Never fall back to an external browser/)
 })

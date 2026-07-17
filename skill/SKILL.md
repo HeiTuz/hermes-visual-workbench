@@ -1,7 +1,7 @@
 ---
 name: midjourney-visual-workbench
 description: Prepare, capture, QC, select, and optionally upscale Midjourney results in Hermes Desktop without touching cookies or spending credits without current-turn approval.
-version: 0.2.1
+version: 0.3.0
 platforms: [macos]
 metadata:
   hermes:
@@ -22,7 +22,7 @@ Use this skill when the user asks to prepare or run a Midjourney job, compare a 
 - Default to `DRAFT → READY` and stop before submit.
 - Browser authority is the Browser pane rendered inside the Hermes Desktop window, backed by `persist:hermes-browser`. Scope every GUI capture and action to `computer_use(..., app="Hermes")` and confirm the target window belongs to Hermes before interacting.
 - Never use `browser_navigate`, any `browser_*` tool, or an external browser application such as Chrome, Safari, Arc, Brave, or Edge for this workflow. Those are different browser sessions and do not carry the Hermes internal Browser pane state.
-- If the Hermes internal Browser pane cannot be found, opened, captured, or controlled, stop as `internal_pane_unavailable` (renamed from `internal_browser_unavailable` in v0.2.x; the provider registry's automation descriptor is the canonical source of this state name). Never fall back to an external browser.
+- If the Hermes internal Browser pane cannot be found, opened, captured, or controlled, stop as `internal_pane_unavailable`; the provider registry's automation descriptor is the canonical source of this state name. Never fall back to an external browser.
 - Pinned-target precondition (hard stop): immediately before every pointer, focus, or type action, re-verify from a fresh `app="Hermes"` capture that the action target is the internal Browser pane inside the Hermes Desktop window and that the pane's visible **Automation target** affordance reads `Hermes internal Browser pane · persist:hermes-browser`. If the affordance reads `Automation target unavailable`, or the pane cannot be re-verified, stop as `internal_pane_unavailable`. Never retarget an external browser (Chrome, Safari, Arc, Brave, Edge) or an isolated `browser_*` session.
 - Use real pointer/focus/type events inside the Hermes window. Do not execute arbitrary page JavaScript and do not mutate DOM state directly.
 - Bound every wait and retry. Never duplicate a submission after an uncertain click.

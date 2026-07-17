@@ -128,4 +128,123 @@ Freeze **Slice 1 (provider-adapter core extraction)**, minimal cut = no persiste
 6. Adapter proof: at least one non-Midjourney provider (higgsfield-image) renders structured candidate review from its own descriptor (own dimension keys/labels), with edge tests for invalid input and restart/restore of its evaluation state.
 7. Hard lines re-verified: Browser/QC toggles remain pane-independent; Result/Reference vertical split untouched; `npm run fixture:e2e` unchanged and passing.
 
-<!-- Lane B sections follow: 'Workflow & IA audit' and 'Acceptance criteria'. Append below; do not edit Lane A sections above. -->
+## Workflow & IA audit
+
+Evidence base: `plugin.js` @ fef8ee4 (v0.2.1, read in full), `scripts/qc-core.mjs`, `scripts/lib.mjs`, `scripts/fixture-e2e.mjs`, `fixtures/midjourney-grid.svg`, `tests/*.test.mjs`, `README.md`, `skill/SKILL.md`, `manifest.json`.
+
+### Surfaces and entry points
+
+| Surface | Registration | Behavior |
+| --- | --- | --- |
+| Browser pane | `panes` area, id `visual-workbench:browser`, right dock, 560px | `BrowserPane` (plugin.js:699) |
+| Quality Control pane | `panes` area, id `visual-workbench:qc`, docked right of Browser, 330px | `QcPane` (plugin.js:1066) |
+| Titlebar toggles | `titleBar.appControls` order 10 (globe → Browser) and 20 (checklist → QC) | `PaneTitlebarToggle` (plugin.js:373). Each button calls `host.panes.toggle(paneId)` for **its own pane only** — pane independence is structural, not incidental. `aria-pressed` mirrors open state. Renders `null` when `host.panes.toggle` is absent (pre-#65647 hosts). |
+| Chat-image action: **Open as Result** | `chat.imageActions` order 10 | Sets `browserPanels.result.url`, opens Browser pane. |
+| Chat-image action: **Set as Reference** | order 20 | Sets `browserPanels.reference.url`, forces `browserSplit: true`, opens Browser pane. |
+| Chat-image action: **Open in task QC** | order 30 | Sets result URL, selects profile via `qcProfileFor` (toolName contains `midjourney` → `midjourney`; video media or `generate_video` → `higgsfield-video`; `higgsfield` → `higgsfield-image`; else `design`), opens **both** panes. |
+
+### Current user workflows
+
+1. **Browser inspection.** `PanelIntro` copy switches on host capability ("secure persistent webview session" vs "portable iframe mode"). Layout controls: `Single` / `Top–Bottom Split` / `Swap` (Swap exchanges the *entire* panel configs — url, preset, dimensions — and is disabled outside split). Split renders Result above Reference in a `minmax(0,1fr)/minmax(0,1fr)` grid — the vertical Result/Reference split that must be preserved. Per panel: URL input (Enter or `Open` commits via `normalizeUrl` — bare host → `https://`, absolute path → `file://`), viewport preset select (`responsive`, `desktop 1440×900`, `laptop 1280×800`, `tablet 768×1024`, `mobile 390×844`, `custom` with min-240 numeric width/height), `Capture PNG` (enabled only when url is a `page` and `window.hermesDesktop.browser.capture` exists).
+2. **Media rendering.** `mediaKind` routes by extension/data-URI: image → `<img>`, video → `<video controls>`, page → privileged `<webview partition="persist:hermes-browser">` or sandboxed `<iframe>` fallback. `ViewportStage` centers a real-size guest and scales with `min(fit, 1)` — never upscales; guest keeps true `innerWidth/innerHeight`.
+3. **Checklist QC (design / higgsfield-image / higgsfield-video).** `ProfileSelect` → per-profile `CheckRow`s: status buttons `PASS/FAIL/NA/WAIT` (pending), evidence textarea. Header shows `N FAIL` / `N PASS` badges and target linkage (`RESULT + REFERENCE` / `RESULT LINKED` / `NO TARGET`). Evaluations persist per profile, so switching profiles never destroys another profile's answers.
+4. **Midjourney QC import path.** `qcProfile === 'midjourney'` swaps the whole pane to `MidjourneyQcPane`: `JobEditor` (state badge, id, brief, transition buttons generated from `JOB_TRANSITIONS` only — illegal transitions are unreachable; "Status only · does not trigger Midjourney actions"), strict JSON textarea + `Import QC JSON` / `Export QC JSON`, capture summary line, four `CandidateCard`s (summary, 0–100 clamped score, disposition select, newline-split evidence capped at 20, repair prompt, eight dimension rows, `Select` with inset accent on the selected card).
+5. **Non-billable fixture path.** `npm run fixture:e2e` writes `request.json` / `provenance.json` / `qc.json` / `capture.svg` under `$HERMES_HOME/artifacts/midjourney/<job-id>/` with `billableActionsExecuted: []`; the generated `qc.json` is the deterministic import payload for workflow verification (grid fixture labels A/B/C/D in reading order).
+
+### Information architecture
+
+```
+Titlebar ─ [Browser toggle] [QC toggle]                (independent controls)
+Browser pane                       Quality Control pane
+├─ PanelIntro (capability copy)    ├─ PanelIntro (profile description)
+├─ Single | Split | Swap           ├─ ProfileSelect (4 profiles)
+├─ Result panel                    ├─ checklist profiles:
+│  ├─ URL bar + Open               │  ├─ FAIL/PASS badges + target link
+│  ├─ preset + custom W×H          │  └─ CheckRow × profile.checks
+│  ├─ Capture PNG + status         └─ midjourney profile:
+│  └─ ViewportStage → Surface         ├─ JobEditor (state machine UI)
+└─ Reference panel (split only)       ├─ QC JSON import/export + error
+   └─ (same controls as Result)       ├─ capture summary (if any)
+                                      └─ CandidateCard × A/B/C/D
+```
+
+Coupling observation for Lane A's thesis: the QC pane's IA already forks at exactly one point (`QcPane` line 1069: `if (workbench.qcProfile === 'midjourney') return MidjourneyQcPane`) — the natural provider seam is one branch, not scattered.
+
+### UI states inventory
+
+| Surface | Empty | Loading | Error | Populated |
+| --- | --- | --- | --- | --- |
+| BrowserSurface | `EmptyState` "No target" | none (native webview/iframe load; **gap**: no spinner/progress) | **gap**: navigation failures are silent | img / video / webview / iframe |
+| Capture PNG | no status line | `Capturing…` | inline message + `host.notify` error; also "Capture unavailable" when API/guest missing | `Saved W×H` or `Captured W×H · save cancelled` |
+| Checklist CheckRow | status `PENDING` (warn badge), empty note | n/a | n/a (status is an enum of buttons) | pass/fail/na + note |
+| QC header | `NO TARGET` + `0 FAIL`/`0 PASS` muted | n/a | n/a | counts + `RESULT LINKED` / `RESULT + REFERENCE` |
+| Midjourney import | placeholder "Paste strict schema-version 1 QC JSON" | n/a (synchronous) | `role="alert"` inline error with `$path: message` detail; **prior good state preserved** (verified by tests/qc-core.test.mjs "does not mutate prior good state when an import fails") | formatted JSON + success notify |
+| Midjourney export | — | n/a | validation of *current state* can fail (e.g. blank job id → `$.job.id: must not be empty`) and is shown in the same alert slot | clipboard copy, or notify-only when clipboard is unavailable |
+| JobEditor | `DRAFT` badge, empty fields | n/a | terminal states (`ATTACHED`/`FAILED`/`CANCELLED`) render zero transition buttons | allowed `Mark <STATE>` buttons only |
+
+### Keyboard flow
+
+- URL inputs commit on `Enter`; everything else is pointer-first but uses native focusable controls, so tab order follows DOM order: intro → layout buttons → Result URL → Open → preset → (custom W/H) → Capture → Reference panel (split) → … ; QC pane: profile select → job id → brief → transition buttons → JSON textarea → Import → Export → candidate cards top-to-bottom.
+- Every interactive control carries an `aria-label` (verified across BrowserPanel, JobEditor, CandidateCard, MidjourneyQcPane); toggles carry `aria-pressed`.
+- **Gaps:** no keyboard shortcuts for pane toggles; import error `role="alert"` is announced but focus is not moved to it; check-status changes are 4-button groups (no radio semantics/arrow-key cycling); native `<select>`s are used for preset/profile/disposition (acceptable, host-styled).
+
+### Persistence and restart behavior
+
+- Single storage key `workbench.v2`, rewritten on **every** `setState` (plugin.js:353) via `persistedState()` — persisted schema v2 shape: `schemaVersion, browserSplit, browserPanels{result,reference}, qcProfile, evaluations, job, candidates, selectedCandidate, qcJson, capture`.
+- `register()` restore order: `workbench.v2` → legacy `workbench.v1` (v1 `browserUrl` migrates into the result panel) → defaults; then immediately re-persists as v2. Restore is field-level permissive repair, never throws (invalid scores → 0, unknown dispositions → REJECT, evidence filtered/sliced to 20, panels re-defaulted below 240px) — covered by tests "runtime persisted-state restore repairs malformed and partial candidate data" and "migrates v0.1 persisted state without losing browser and evaluation data".
+- Deliberately **not** persisted: URL drafts, capture status line, JSON textarea draft (mirrors persisted `qcJson` via `useEffect`), pane open/closed state (host-owned).
+- Sharp edge for any slice touching persistence: import strictness (`validateQcDocument`, throwing) and restore permissiveness (`restoredState`, repairing) are two intentionally different regimes. Acceptance criteria below keep them distinct.
+
+### Host-capability fallback behavior (UI view)
+
+| Missing capability | UI consequence |
+| --- | --- |
+| `host.panes.toggle` | Titlebar toggles render `null`; panes remain registered/portable |
+| `window.hermesDesktop.browser.capture` | iframe surface, Capture PNG disabled, intro copy switches to "portable iframe mode" |
+| `navigator.clipboard.writeText` | Export succeeds with "clipboard unavailable" notify instead of copy |
+| `host.panes.open` atom | Toggle falls back to `CLOSED_PANE_ATOM` (always shows closed styling) |
+
+## Acceptance criteria
+
+Slice names follow the three candidates fixed in the context snapshot (`.gjc/context/visual-workbench-vnext-20260717T000000Z.md`, "Unknowns"): S1 provider-adapter core extraction, S2 multi-job queue, S3 review-session UX. Lane A owns the final ranking; criteria below are defined for all three so the leader can freeze any of them without another round trip.
+
+### S1 — Provider-adapter core extraction (Lane B recommendation: rank 1)
+
+Value: unlocks every future provider without UI churn. Risk: lowest of the three when framed as behavior-preserving. Coherence: the fork already exists at exactly one line in `QcPane`.
+
+**UI states:** unchanged by contract. The pane must render byte-identical control sets for all four profiles; the `midjourney` profile must still swap to the full `MidjourneyQcPane`.
+
+**Keyboard flow:** unchanged by contract — tab order and `aria-*` attributes identical before/after.
+
+**Acceptance criteria (all measurable):**
+1. `npm test` and `npm run fixture:e2e` pass; `node --check plugin.js` clean.
+2. QC document schema v1 behavior is byte-for-byte: the same invalid inputs produce the same `$path: message` error strings (regression-tested against the existing error-string assertions in `tests/qc-core.test.mjs`), the 64 KiB bound and exact-key rejection are unchanged, and a valid import→export round trip produces identical formatted JSON.
+3. Import failure still preserves prior good state (existing test must stay green untouched).
+4. Persisted state: if the slice ships with schema v2 unchanged, `workbench.v2` snapshots from v0.2.1 restore identically (add a frozen-fixture restore test). If a v3 bump is required, it must be explicit (`PERSISTED_SCHEMA_VERSION = 3`, a named migration function, and new tests restoring both v2 and legacy v1 snapshots) — no silent migration.
+5. Provider seam is real: a registry (or equivalent) where Midjourney is registered as an adapter; grep-level check — no `midjourney`/`MJ` literals inside the provider-agnostic core paths except the adapter registration itself.
+6. Pane independence and Result/Reference vertical split preserved: titlebar toggles still target only their own pane id; split still renders Result above Reference.
+7. Rendered smoke (strongest available; #65647 checkout if runnable): screenshots at desktop and ~390px-narrow QC pane widths show no layout diff vs v0.2.1 for all four profiles; limitation documented if the host build is not runnable.
+
+### S2 — Multi-job queue (rank 2)
+
+**UI states:** empty (no jobs → `EmptyState` with a create affordance), populated (job list with active-job highlight mirroring `CandidateCard`'s inset-accent selection idiom), error (duplicate/invalid job id rejected inline; illegal transitions remain unreachable), loading n/a (synchronous local state).
+
+**Keyboard flow:** job list entries focusable in DOM order; Enter activates a job; delete/destructive actions must be explicit buttons with `aria-label`s, never keyboard-only shortcuts.
+
+**Acceptance criteria:** create/switch/delete jobs with per-job `job`, `candidates`, `selectedCandidate`, `qcJson` isolation (switching jobs never bleeds candidate data); restart restores the active job and full queue; requires explicit v2→v3 migration wrapping the existing single job as the first queue entry, tested with a frozen v2 snapshot; QC document schema v1 untouched (it stays a single-job document); export always exports the active job only; `npm test` green with new edge tests (invalid job id, restart mid-queue, oversize import against the active job).
+
+### S3 — Review-session UX (rank 3)
+
+**UI states:** compare mode (two candidates side-by-side reusing the Result/Reference split idiom without breaking panel independence), decision-summary state (disposition totals, selected recommendation), empty (no imported document → prompt to import).
+
+**Keyboard flow:** candidate-to-candidate navigation via focusable cards; summary reachable in tab order after the last card; focus moves to the summary when a review is completed.
+
+**Acceptance criteria:** disposition totals always equal 4 across A–D; summary export validates through the same strict v1 validator; no new persisted fields without an explicit schema decision; import/export and prior-good-state behavior untouched; `npm test` green plus new tests for summary totals and focus-order assertions where testable.
+
+### Cross-slice invariants (apply to whichever slice is frozen)
+
+- Browser and QC panes stay independent; each titlebar control toggles only its pane.
+- Result/Reference vertical split preserved.
+- No cookie/token/storage/credential access, no DOM hacks into guest pages, no paid Midjourney actions, no publishing.
+- Import strictness vs restore permissiveness remain separate regimes; neither is relaxed to make the other simpler.
+- Any persisted-schema change is explicit, versioned, and covered by old-snapshot restore regressions.

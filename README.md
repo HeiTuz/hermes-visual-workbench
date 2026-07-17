@@ -19,8 +19,9 @@ Visual Workbench keeps the product workflow in a runtime plugin while Hermes cor
   - **Open as Result**
   - **Set as Reference**
   - **Open in task QC**
-- QC profiles for design, generated images, generated video, and strict **Midjourney A/B/C/D** review.
-- Midjourney candidate score, disposition, evidence, repair prompt, eight-dimension rubric, and selected recommendation.
+- QC profiles for design, generated images, generated video, and provider-driven structured **A/B/C/D** review.
+- A core provider registry drives structured candidate review from per-provider dimension descriptors: Midjourney is the first adapter (strict schema-v1 QC JSON wire format, eight-dimension rubric), and Higgsfield Image renders structured review from its own descriptor.
+- Candidate score, disposition, evidence, repair prompt, per-provider dimension rubric, and selected recommendation.
 - Strict 64 KiB-bounded QC JSON import/export with unknown-field and score-range rejection.
 - Persisted, versioned job state (`DRAFT` through `ATTACHED`, plus terminal failure/cancel states).
 - Native **Capture PNG** affordance for the secure persistent Browser guest.

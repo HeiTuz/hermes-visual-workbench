@@ -502,10 +502,16 @@ function mediaKind(url) {
 
 function qcProfileFor(input) {
   const toolName = String(input.toolName || '').toLowerCase()
-  if (toolName.includes('midjourney')) return 'midjourney'
-  if (mediaKind(input.src) === 'video' || toolName.includes('generate_video')) return 'higgsfield-video'
-  if (toolName.includes('higgsfield')) return 'higgsfield-image'
-  return 'design'
+  const video = mediaKind(input.src) === 'video' || toolName.includes('generate_video')
+  const matches = PROVIDER_IDS
+    .map(providerId => PROVIDERS[providerId])
+    .filter(provider => provider.chatImageToolNames.some(name => toolName.includes(name)))
+  // A provider owning a full QC wire format outranks the video heuristic; other
+  // structured providers yield to it (e.g. video-generating tool variants).
+  const wireProvider = matches.find(provider => provider.qcDocument)
+  if (wireProvider) return wireProvider.profileId
+  if (video) return 'higgsfield-video'
+  return matches.length ? matches[0].profileId : 'design'
 }
 
 function statusVariant(status) {
@@ -789,8 +795,17 @@ function BrowserPanel({ panelId, title }) {
   })
 }
 
+function automationTarget() {
+  for (const providerId of PROVIDER_IDS) {
+    if (PROVIDERS[providerId].automation) return PROVIDERS[providerId].automation
+  }
+  return null
+}
+
 function AutomationTargetBadge() {
+  const automation = automationTarget()
   const pinned = Boolean(window.hermesDesktop?.browser?.capture)
+  if (!automation) return null
   return jsxs('div', {
     'aria-label': 'Automation target',
     role: 'status',
@@ -806,8 +821,8 @@ function AutomationTargetBadge() {
       jsx(Codicon, { name: pinned ? 'verified' : 'circle-slash' }),
       jsx('span', {
         children: pinned
-          ? 'Automation target · Hermes internal Browser pane · persist:hermes-browser'
-          : 'Automation target unavailable · iframe fallback — agents stop as internal_browser_unavailable'
+          ? `Automation target · ${automation.appScope} internal Browser pane · ${automation.partition}`
+          : `Automation target unavailable · iframe fallback — agents stop as ${automation.unavailableState}`
       })
     ]
   })
@@ -984,7 +999,7 @@ function JobEditor({ workbench }) {
   })
 }
 
-function CandidateCard({ candidate, selected }) {
+function CandidateCard({ candidate, provider, selected }) {
   const update = patch => setState({ candidates: { ...state.candidates, [candidate.id]: { ...candidate, ...patch } } })
   const updateDimension = (key, patch) => update({
     dimensions: { ...candidate.dimensions, [key]: { ...candidate.dimensions[key], ...patch } }
@@ -1058,7 +1073,8 @@ function CandidateCard({ candidate, selected }) {
       }),
       jsx('div', {
         style: { display: 'grid', gap: 6, marginTop: 8 },
-        children: QC_PROFILES.midjourney.checks.map(([key, label]) => {
+        children: provider.dimensions.map(key => {
+          const label = provider.dimensionLabels[key]
           const dimension = candidate.dimensions[key] || { score: 0, evidence: '' }
           return jsxs('div', {
             style: { alignItems: 'center', display: 'grid', gap: 6, gridTemplateColumns: 'minmax(0, 1fr) 62px' },
@@ -1085,25 +1101,26 @@ function CandidateCard({ candidate, selected }) {
   })
 }
 
-function MidjourneyQcPane({ workbench }) {
+function StructuredReviewPane({ provider, workbench }) {
   const [draft, setDraft] = useState(workbench.qcJson || '')
   const [importError, setImportError] = useState('')
   useEffect(() => setDraft(workbench.qcJson || ''), [workbench.qcJson])
+  const wire = provider.qcDocument
 
   const importQc = () => {
     try {
-      const document = validateQcDocument(draft)
+      const document = wire.validate(draft)
       const formatted = JSON.stringify(document, null, 2)
       setState({
         job: document.job,
         candidates: Object.fromEntries(document.candidates.map(candidate => [candidate.id, candidate])),
         selectedCandidate: document.selectedCandidate,
         qcJson: formatted,
-        qcProfile: 'midjourney'
+        qcProfile: provider.profileId
       })
       setDraft(formatted)
       setImportError('')
-      host.notify({ kind: 'success', message: `Imported Midjourney QC for ${document.job.id}` })
+      host.notify({ kind: 'success', message: `Imported ${provider.label} for ${document.job.id}` })
     } catch (error) {
       setImportError(error instanceof Error ? error.message : String(error))
     }
@@ -1133,45 +1150,48 @@ function MidjourneyQcPane({ workbench }) {
   return jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
     children: [
-      jsx(PanelIntro, { title: 'Midjourney QC', description: QC_PROFILES.midjourney.description }),
+      jsx(PanelIntro, { title: provider.label, description: QC_PROFILES[provider.profileId].description }),
       jsx('div', { style: { padding: '0 12px 8px' }, children: jsx(ProfileSelect, { value: workbench.qcProfile }) }),
       jsx(Separator, {}),
       jsx(ScrollArea, {
         style: { flex: 1, minHeight: 0 },
         children: jsxs('div', {
           children: [
-            jsx(JobEditor, { workbench }),
-            jsx(Separator, {}),
-            jsxs('div', {
-              style: { padding: '10px 12px' },
-              children: [
-                jsx(Textarea, {
-                  'aria-label': 'Midjourney QC JSON',
-                  onChange: event => setDraft(event.target.value),
-                  placeholder: 'Paste strict schema-version 1 QC JSON',
-                  style: { minHeight: 120 },
-                  value: draft
-                }),
-                importError
-                  ? jsx('div', { role: 'alert', style: { color: 'var(--ui-danger, #f87171)', fontSize: 10, marginTop: 6 }, children: importError })
-                  : null,
-                jsxs('div', {
-                  style: { display: 'flex', gap: 6, marginTop: 8 },
+            wire ? jsx(JobEditor, { workbench }) : null,
+            wire ? jsx(Separator, {}) : null,
+            wire
+              ? jsxs('div', {
+                  style: { padding: '10px 12px' },
                   children: [
-                    jsx(Button, { onClick: importQc, size: 'xs', children: 'Import QC JSON' }),
-                    jsx(Button, { onClick: exportQc, size: 'xs', variant: 'outline', children: 'Export QC JSON' })
+                    jsx(Textarea, {
+                      'aria-label': `${provider.label} JSON`,
+                      onChange: event => setDraft(event.target.value),
+                      placeholder: `Paste strict schema-version ${wire.schemaVersion} QC JSON`,
+                      style: { minHeight: 120 },
+                      value: draft
+                    }),
+                    importError
+                      ? jsx('div', { role: 'alert', style: { color: 'var(--ui-danger, #f87171)', fontSize: 10, marginTop: 6 }, children: importError })
+                      : null,
+                    jsxs('div', {
+                      style: { display: 'flex', gap: 6, marginTop: 8 },
+                      children: [
+                        jsx(Button, { onClick: importQc, size: 'xs', children: 'Import QC JSON' }),
+                        jsx(Button, { onClick: exportQc, size: 'xs', variant: 'outline', children: 'Export QC JSON' })
+                      ]
+                    })
                   ]
                 })
-              ]
-            }),
+              : null,
             workbench.capture
               ? jsx('div', {
                   style: { color: 'var(--ui-text-tertiary)', fontSize: 10, padding: '0 12px 10px' },
                   children: `Capture ${workbench.capture.width}×${workbench.capture.height}${workbench.capture.path ? ` · ${workbench.capture.path}` : ''}`
                 })
               : null,
-            ...CANDIDATE_IDS.map(id => jsx(CandidateCard, {
+            ...provider.candidateIds.map(id => jsx(CandidateCard, {
               candidate: workbench.candidates[id],
+              provider,
               selected: workbench.selectedCandidate === id
             }, id))
           ]
@@ -1183,8 +1203,9 @@ function MidjourneyQcPane({ workbench }) {
 
 function QcPane() {
   const workbench = useWorkbench()
+  const provider = providerForProfile(workbench.qcProfile)
+  if (provider?.structuredReview) return jsx(StructuredReviewPane, { provider, workbench })
   const profile = QC_PROFILES[workbench.qcProfile] || QC_PROFILES.design
-  if (workbench.qcProfile === 'midjourney') return jsx(MidjourneyQcPane, { workbench })
   const values = Object.values(workbench.evaluations[workbench.qcProfile] || {})
   const failed = values.filter(value => value.status === 'fail').length
   const passed = values.filter(value => value.status === 'pass').length

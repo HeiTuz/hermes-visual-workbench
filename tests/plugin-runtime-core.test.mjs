@@ -7,7 +7,11 @@ import {
   blankCandidate,
   CANDIDATE_IDS,
   migratePersistedState,
+  PROVIDER_IDS,
+  PROVIDERS,
+  providerForProfile,
   QC_DIMENSIONS,
+  QC_PROFILE_IDS,
   validateQcDocument
 } from '../scripts/qc-core.mjs'
 
@@ -44,7 +48,24 @@ function loadRuntimeCore() {
   assert.notEqual(finish, -1, 'plugin core end marker is missing')
   assert.ok(finish > start, 'plugin core markers are out of order')
   const source = pluginSource.slice(start + begin.length, finish)
-  return Function(`${source}\nreturn { DEFAULT_STATE, restoredState, validateQcDocument }`)()
+  return Function(`${source}\nreturn { DEFAULT_STATE, restoredState, validateQcDocument, PROVIDERS, PROVIDER_IDS, providerForProfile }`)()
+}
+
+function serializableProvider(provider) {
+  return {
+    id: provider.id,
+    label: provider.label,
+    profileId: provider.profileId,
+    candidateIds: [...provider.candidateIds],
+    structuredReview: provider.structuredReview,
+    dimensions: [...provider.dimensions],
+    dimensionLabels: { ...provider.dimensionLabels },
+    chatImageToolNames: [...provider.chatImageToolNames],
+    qcDocument: provider.qcDocument
+      ? { schemaVersion: provider.qcDocument.schemaVersion, maxBytes: provider.qcDocument.maxBytes }
+      : null,
+    automation: provider.automation ? { ...provider.automation } : null
+  }
 }
 
 test('runtime plugin validator stays behaviorally aligned with the standalone QC core', () => {
@@ -85,4 +106,20 @@ test('runtime persisted-state restore repairs malformed and partial candidate da
   assert.deepEqual(restored.candidates.A.evidence, [])
   assert.equal(restored.candidates.A.dimensions.composition.score, 88)
   assert.equal(restored.candidates.A.dimensions.promptFidelity.score, 0)
+})
+
+test('runtime provider registry stays behaviorally aligned with the standalone QC core', () => {
+  const runtime = loadRuntimeCore()
+  assert.deepEqual([...runtime.PROVIDER_IDS], [...PROVIDER_IDS])
+  for (const providerId of PROVIDER_IDS) {
+    assert.deepEqual(serializableProvider(runtime.PROVIDERS[providerId]), serializableProvider(PROVIDERS[providerId]))
+  }
+  for (const profileId of [...QC_PROFILE_IDS, 'unknown-profile']) {
+    assert.equal(runtime.providerForProfile(profileId)?.id ?? null, providerForProfile(profileId)?.id ?? null)
+  }
+
+  const document = validDocument()
+  assert.deepEqual(runtime.PROVIDERS.midjourney.qcDocument.validate(document), PROVIDERS.midjourney.qcDocument.validate(document))
+  assert.equal(PROVIDERS.midjourney.qcDocument.validate, validateQcDocument, 'standalone adapter must reuse the schema-v1 validator')
+  assert.equal(runtime.PROVIDERS.midjourney.qcDocument.validate, runtime.validateQcDocument, 'runtime adapter must reuse the schema-v1 validator')
 })

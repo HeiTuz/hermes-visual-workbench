@@ -19,8 +19,12 @@ Visual Workbench keeps the product workflow in a runtime plugin while Hermes cor
   - **Open as Result**
   - **Set as Reference**
   - **Open in task QC**
-- QC profiles for design, generated images, and generated video.
-- Persistent plugin state with no separate backend service.
+- QC profiles for design, generated images, generated video, and strict **Midjourney A/B/C/D** review.
+- Midjourney candidate score, disposition, evidence, repair prompt, eight-dimension rubric, and selected recommendation.
+- Strict 64 KiB-bounded QC JSON import/export with unknown-field and score-range rejection.
+- Persisted, versioned job state (`DRAFT` through `ATTACHED`, plus terminal failure/cancel states).
+- Native **Capture PNG** affordance for the secure persistent Browser guest.
+- Packaged `midjourney-visual-workbench` Hermes workflow skill and deterministic non-billable fixture runner.
 
 The preview is scaled to fit its pane, but the guest page still receives the selected viewport as its real `window.innerWidth` / `window.innerHeight`.
 
@@ -40,6 +44,7 @@ The installer writes:
 
 ```text
 $HERMES_HOME/desktop-plugins/visual-workbench/plugin.js
+$HERMES_HOME/skills/midjourney-visual-workbench/SKILL.md
 ```
 
 When `HERMES_HOME` is unset, it uses `~/.hermes`.
@@ -48,7 +53,7 @@ Hermes Desktop watches this directory and normally hot-loads the plugin. If it d
 
 ### Update
 
-Run the install command again. A changed local `plugin.js` is backed up before replacement.
+Run the install command again. Changed plugin and skill files are backed up separately before replacement. The install marker records both hashes.
 
 ### Uninstall
 
@@ -56,14 +61,16 @@ Run the install command again. A changed local `plugin.js` is backed up before r
 npx --yes github:HeiTuz/hermes-visual-workbench -- --uninstall
 ```
 
-The uninstaller refuses to delete a modified or unmanaged `plugin.js`. Use `--force` only when you intentionally want to remove it.
+The uninstaller refuses to delete either managed file when its hash changed. It pins deletion to the expected plugin and skill paths instead of trusting paths stored in the marker. Use `--force` only when you intentionally want to remove local modifications.
 
 ### Custom Hermes home or test target
 
 ```bash
 npx --yes github:HeiTuz/hermes-visual-workbench -- --hermes-home /path/to/.hermes
-npx --yes github:HeiTuz/hermes-visual-workbench -- --target /tmp/visual-workbench
+npx --yes github:HeiTuz/hermes-visual-workbench -- --target /tmp/visual-workbench --skill-target /tmp/midjourney-skill
 ```
+
+`--target` and `--skill-target` are a required pair so a test install cannot accidentally write the skill into the real Hermes home. Installation preflights regular files, rejects managed symlinks, and rolls back earlier writes if a later managed write fails.
 
 ## Hermes compatibility
 
@@ -87,11 +94,29 @@ The plugin owns workflow and presentation. Hermes core remains authoritative for
 
 The plugin does not ship a Python backend and does not copy credentials.
 
+It uses the existing `persist:hermes-browser` partition as-is and never reads, exports, deletes, or migrates its cookies. Midjourney submit, upscale, and variation remain agent approval gates: the plugin displays state and QC but never clicks those controls itself.
+
+## Non-billable fixture E2E
+
+Create a complete local artifact job without a Midjourney submission:
+
+```bash
+npm run fixture:e2e -- --job-id fixture-v1
+```
+
+The runner writes `request.json`, `provenance.json`, `qc.json`, and `capture.svg` under:
+
+```text
+$HERMES_HOME/artifacts/midjourney/<job-id>/
+```
+
+`provenance.json` records `billableActionsExecuted: []`, `cookieDataAccessed: false`, and `credentialsEntered: false`. Import the generated `qc.json` in **Quality Control → Midjourney QC** to verify the rendered four-candidate recommendation path.
+
 ## Development
 
 ```bash
 npm test
-node scripts/install.mjs --target /tmp/visual-workbench
+node scripts/install.mjs --target /tmp/visual-workbench --skill-target /tmp/midjourney-skill
 ```
 
 Runtime plugin source is plain ESM: no build step and no bundled copy of React or the Hermes SDK.

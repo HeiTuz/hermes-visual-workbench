@@ -6,27 +6,36 @@ import { fileURLToPath } from 'node:url'
 
 export const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
 export const MARKER_NAME = '.hermes-visual-workbench-install.json'
+export const SKILL_NAME = 'midjourney-visual-workbench'
 
 export function parseArgs(argv) {
   const args = [...argv]
   while (args[0] === '--') args.shift()
 
-  const options = { force: false, help: false, hermesHome: '', target: '', uninstall: false }
+  const options = { force: false, help: false, hermesHome: '', skillTarget: '', target: '', uninstall: false }
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
     if (arg === '--force') options.force = true
     else if (arg === '--help' || arg === '-h') options.help = true
     else if (arg === '--uninstall') options.uninstall = true
-    else if (arg === '--target' || arg === '--hermes-home') {
+    else if (arg === '--target' || arg === '--skill-target' || arg === '--hermes-home') {
       const value = args[index + 1]
       if (!value || value.startsWith('--')) throw new Error(`${arg} requires a path`)
       index += 1
       if (arg === '--target') options.target = value
+      else if (arg === '--skill-target') options.skillTarget = value
       else options.hermesHome = value
     } else {
       throw new Error(`Unknown option: ${arg}`)
     }
+  }
+
+  if (Boolean(options.target) !== Boolean(options.skillTarget)) {
+    throw new Error('--target and --skill-target must be supplied together')
+  }
+  if (options.force && !options.uninstall) {
+    throw new Error('--force is only valid with --uninstall')
   }
 
   return options
@@ -36,6 +45,15 @@ export function targetDirectory(options, env = process.env) {
   if (options.target) return resolve(options.target)
   const hermesHome = options.hermesHome || env.HERMES_HOME || join(homedir(), '.hermes')
   return join(resolve(hermesHome), 'desktop-plugins', 'visual-workbench')
+}
+
+export function hermesHomeDirectory(options, env = process.env) {
+  return resolve(options.hermesHome || env.HERMES_HOME || join(homedir(), '.hermes'))
+}
+
+export function skillDirectory(options, env = process.env) {
+  if (options.skillTarget) return resolve(options.skillTarget)
+  return join(hermesHomeDirectory(options, env), 'skills', SKILL_NAME)
 }
 
 export function sha256(value) {
@@ -48,17 +66,21 @@ export async function atomicWrite(path, value, mode = 0o644) {
   await writeFile(temporary, value, { mode })
 
   try {
-    await rename(temporary, path)
-  } catch (error) {
-    if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error
-    await rm(path, { force: true })
-    await rename(temporary, path)
+    try {
+      await rename(temporary, path)
+    } catch (error) {
+      if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error
+      await rm(path, { force: true })
+      await rename(temporary, path)
+    }
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {})
   }
 }
 
 export async function backupFile(path, backupDirectory) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const destination = join(backupDirectory, `plugin-${stamp}.js`)
+  const destination = join(backupDirectory, `${basename(path)}-${stamp}.bak`)
   await mkdir(backupDirectory, { recursive: true })
   await copyFile(path, destination)
   return destination

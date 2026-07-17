@@ -16,7 +16,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const PLUGIN_ID = 'visual-workbench'
-const PLUGIN_VERSION = '0.1.0'
+const PLUGIN_VERSION = '0.2.0'
 const BROWSER_PANE_ID = `${PLUGIN_ID}:browser`
 const QC_PANE_ID = `${PLUGIN_ID}:qc`
 const CLOSED_PANE_ATOM = atom(false)
@@ -61,7 +61,60 @@ const QC_PROFILES = {
       ['artifacts', 'Artifacts & flicker'],
       ['framing', 'Framing & crop']
     ]
+  },
+  midjourney: {
+    label: 'Midjourney QC',
+    description: 'Strict A/B/C/D scoring, evidence, repair prompts, and production recommendation.',
+    checks: [
+      ['promptFidelity', 'Prompt fidelity'],
+      ['composition', 'Composition'],
+      ['identityReferenceFidelity', 'Identity / reference fidelity'],
+      ['anatomyGeometry', 'Anatomy & geometry'],
+      ['artifacts', 'Artifacts'],
+      ['typography', 'Typography'],
+      ['colorMaterialFidelity', 'Color & material fidelity'],
+      ['productionReadiness', 'Production readiness']
+    ]
   }
+}
+
+// WORKBENCH_CORE_BEGIN
+const PERSISTED_SCHEMA_VERSION = 2
+const QC_DOCUMENT_SCHEMA_VERSION = 1
+const MAX_QC_JSON_BYTES = 64 * 1024
+const CANDIDATE_IDS = ['A', 'B', 'C', 'D']
+const DISPOSITIONS = ['PASS', 'REPAIR', 'REJECT']
+const QC_PROFILE_IDS = ['design', 'higgsfield-image', 'higgsfield-video', 'midjourney']
+const JOB_STATES = [
+  'DRAFT', 'READY', 'SUBMITTED', 'GENERATING', 'GRID_READY', 'QC_RUNNING',
+  'SELECTED', 'UPSCALING', 'DOWNLOADED', 'ATTACHED', 'FAILED', 'CANCELLED'
+]
+const JOB_TRANSITIONS = {
+  DRAFT: ['READY', 'FAILED', 'CANCELLED'], READY: ['SUBMITTED', 'FAILED', 'CANCELLED'],
+  SUBMITTED: ['GENERATING', 'FAILED', 'CANCELLED'], GENERATING: ['GRID_READY', 'FAILED', 'CANCELLED'],
+  GRID_READY: ['QC_RUNNING', 'FAILED', 'CANCELLED'], QC_RUNNING: ['SELECTED', 'FAILED', 'CANCELLED'],
+  SELECTED: ['UPSCALING', 'DOWNLOADED', 'FAILED', 'CANCELLED'],
+  UPSCALING: ['DOWNLOADED', 'FAILED', 'CANCELLED'], DOWNLOADED: ['ATTACHED', 'FAILED', 'CANCELLED'],
+  ATTACHED: [], FAILED: [], CANCELLED: []
+}
+const QC_DIMENSIONS = [
+  'promptFidelity', 'composition', 'identityReferenceFidelity', 'anatomyGeometry',
+  'artifacts', 'typography', 'colorMaterialFidelity', 'productionReadiness'
+]
+
+function blankCandidate(id) {
+  return {
+    id, summary: '', score: 0, disposition: 'REJECT', evidence: [], repairPrompt: '',
+    dimensions: Object.fromEntries(QC_DIMENSIONS.map(key => [key, { score: 0, evidence: '' }]))
+  }
+}
+
+function blankCandidates() {
+  return Object.fromEntries(CANDIDATE_IDS.map(id => [id, blankCandidate(id)]))
+}
+
+function blankJob() {
+  return { id: '', state: 'DRAFT', brief: '', createdAt: '', updatedAt: '' }
 }
 
 const DEFAULT_BROWSER_PANELS = {
@@ -70,44 +123,236 @@ const DEFAULT_BROWSER_PANELS = {
 }
 
 const DEFAULT_STATE = {
+  schemaVersion: PERSISTED_SCHEMA_VERSION,
   browserSplit: false,
   browserPanels: DEFAULT_BROWSER_PANELS,
   qcProfile: 'design',
-  evaluations: {}
+  evaluations: {},
+  job: blankJob(),
+  candidates: blankCandidates(),
+  selectedCandidate: null,
+  qcJson: '',
+  capture: null
 }
 
 let pluginContext = null
 let state = { ...DEFAULT_STATE }
 const listeners = new Set()
+const browserWebviews = new Map()
 
 function persistedState() {
   return {
+    schemaVersion: PERSISTED_SCHEMA_VERSION,
     browserSplit: state.browserSplit,
     browserPanels: state.browserPanels,
     qcProfile: state.qcProfile,
-    evaluations: state.evaluations
+    evaluations: state.evaluations,
+    job: state.job,
+    candidates: state.candidates,
+    selectedCandidate: state.selectedCandidate,
+    qcJson: state.qcJson,
+    capture: state.capture
   }
 }
 
 function restoredState(saved) {
-  const legacyUrl = typeof saved?.browserUrl === 'string' ? saved.browserUrl : ''
+  const source = isRecord(saved) ? saved : {}
+  const legacyUrl = typeof source.browserUrl === 'string' ? source.browserUrl : ''
+  const savedCandidates = isRecord(source.candidates) ? source.candidates : {}
   return {
     ...DEFAULT_STATE,
-    ...saved,
+    schemaVersion: PERSISTED_SCHEMA_VERSION,
+    browserSplit: source.browserSplit === true,
     browserPanels: {
-      result: {
-        ...DEFAULT_BROWSER_PANELS.result,
-        ...saved?.browserPanels?.result,
-        url: saved?.browserPanels?.result?.url || legacyUrl
-      },
-      reference: { ...DEFAULT_BROWSER_PANELS.reference, ...saved?.browserPanels?.reference }
-    }
+      result: restoredPanel(source.browserPanels?.result, DEFAULT_BROWSER_PANELS.result, legacyUrl),
+      reference: restoredPanel(source.browserPanels?.reference, DEFAULT_BROWSER_PANELS.reference)
+    },
+    qcProfile: QC_PROFILE_IDS.includes(source.qcProfile) ? source.qcProfile : DEFAULT_STATE.qcProfile,
+    evaluations: restoredEvaluations(source.evaluations),
+    job: restoredJob(source.job),
+    candidates: Object.fromEntries(CANDIDATE_IDS.map(id => [id, restoredCandidate(savedCandidates[id], id)])),
+    selectedCandidate: CANDIDATE_IDS.includes(source.selectedCandidate) ? source.selectedCandidate : null,
+    qcJson: typeof source.qcJson === 'string' ? source.qcJson : '',
+    capture: restoredCapture(source.capture)
   }
 }
 
+function schemaError(path, message) {
+  throw new Error(`${path}: ${message}`)
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+}
+
+function restoredDimension(value) {
+  const source = isRecord(value) ? value : {}
+  return {
+    score: Number.isInteger(source.score) && source.score >= 0 && source.score <= 100 ? source.score : 0,
+    evidence: typeof source.evidence === 'string' ? source.evidence : ''
+  }
+}
+
+function restoredCandidate(value, id) {
+  const source = isRecord(value) ? value : {}
+  const dimensions = isRecord(source.dimensions) ? source.dimensions : {}
+  return {
+    id,
+    summary: typeof source.summary === 'string' ? source.summary : '',
+    score: Number.isInteger(source.score) && source.score >= 0 && source.score <= 100 ? source.score : 0,
+    disposition: DISPOSITIONS.includes(source.disposition) ? source.disposition : 'REJECT',
+    evidence: Array.isArray(source.evidence)
+      ? source.evidence.filter(item => typeof item === 'string').slice(0, 20)
+      : [],
+    repairPrompt: typeof source.repairPrompt === 'string' ? source.repairPrompt : '',
+    dimensions: Object.fromEntries(QC_DIMENSIONS.map(key => [key, restoredDimension(dimensions[key])]))
+  }
+}
+
+function restoredJob(value) {
+  const source = isRecord(value) ? value : {}
+  return {
+    id: typeof source.id === 'string' ? source.id : '',
+    state: JOB_STATES.includes(source.state) ? source.state : 'DRAFT',
+    brief: typeof source.brief === 'string' ? source.brief : '',
+    createdAt: typeof source.createdAt === 'string' ? source.createdAt : '',
+    updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : ''
+  }
+}
+
+function restoredPanel(value, defaults, legacyUrl = '') {
+  const source = isRecord(value) ? value : {}
+  return {
+    url: typeof source.url === 'string' ? source.url : legacyUrl,
+    preset: typeof source.preset === 'string' ? source.preset : defaults.preset,
+    width: Number.isFinite(source.width) && source.width >= 240 ? source.width : defaults.width,
+    height: Number.isFinite(source.height) && source.height >= 240 ? source.height : defaults.height
+  }
+}
+
+function restoredEvaluations(value) {
+  if (!isRecord(value)) return {}
+  return Object.fromEntries(Object.entries(value).flatMap(([profileId, checks]) => {
+    if (!isRecord(checks)) return []
+    const restoredChecks = Object.fromEntries(Object.entries(checks).flatMap(([checkId, evaluation]) => {
+      if (!isRecord(evaluation)) return []
+      return [[checkId, {
+        status: ['pass', 'fail', 'na', 'pending'].includes(evaluation.status) ? evaluation.status : 'pending',
+        note: typeof evaluation.note === 'string' ? evaluation.note : ''
+      }]]
+    }))
+    return [[profileId, restoredChecks]]
+  }))
+}
+
+function restoredCapture(value) {
+  if (!isRecord(value) || !['result', 'reference'].includes(value.panelId)) return null
+  if (!Number.isInteger(value.width) || value.width <= 0 || !Number.isInteger(value.height) || value.height <= 0) return null
+  return {
+    panelId: value.panelId,
+    width: value.width,
+    height: value.height,
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : '',
+    path: typeof value.path === 'string' ? value.path : ''
+  }
+}
+
+function exactKeys(value, expected, path) {
+  if (!isRecord(value)) schemaError(path, 'must be an object')
+  const actual = Object.keys(value).sort()
+  const wanted = [...expected].sort()
+  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+    const unknown = actual.filter(key => !wanted.includes(key))
+    const missing = wanted.filter(key => !actual.includes(key))
+    schemaError(path, [unknown.length ? `unknown fields ${unknown.join(', ')}` : '', missing.length ? `missing fields ${missing.join(', ')}` : ''].filter(Boolean).join('; '))
+  }
+}
+
+function boundedString(value, path, max, allowEmpty = true) {
+  if (typeof value !== 'string') schemaError(path, 'must be a string')
+  if (!allowEmpty && !value.trim()) schemaError(path, 'must not be empty')
+  if (value.length > max) schemaError(path, `must be at most ${max} characters`)
+  return value
+}
+
+function boundedScore(value, path) {
+  if (!Number.isInteger(value) || value < 0 || value > 100) schemaError(path, 'must be an integer from 0 to 100')
+  return value
+}
+
+function isoTimestamp(value, path) {
+  boundedString(value, path, 64, false)
+  if (!Number.isFinite(Date.parse(value))) schemaError(path, 'must be an ISO timestamp')
+  return value
+}
+
+function validateCandidate(value, path, expectedId) {
+  exactKeys(value, ['id', 'summary', 'score', 'disposition', 'evidence', 'repairPrompt', 'dimensions'], path)
+  if (value.id !== expectedId) schemaError(`${path}.id`, `must be ${expectedId}`)
+  if (!DISPOSITIONS.includes(value.disposition)) schemaError(`${path}.disposition`, `must be one of ${DISPOSITIONS.join(', ')}`)
+  if (!Array.isArray(value.evidence) || value.evidence.length > 20) schemaError(`${path}.evidence`, 'must be an array with at most 20 items')
+  exactKeys(value.dimensions, QC_DIMENSIONS, `${path}.dimensions`)
+  return {
+    id: expectedId,
+    summary: boundedString(value.summary, `${path}.summary`, 2000),
+    score: boundedScore(value.score, `${path}.score`),
+    disposition: value.disposition,
+    evidence: value.evidence.map((item, index) => boundedString(item, `${path}.evidence[${index}]`, 1000, false)),
+    repairPrompt: boundedString(value.repairPrompt, `${path}.repairPrompt`, 4000),
+    dimensions: Object.fromEntries(QC_DIMENSIONS.map(key => {
+      const dimension = value.dimensions[key]
+      exactKeys(dimension, ['score', 'evidence'], `${path}.dimensions.${key}`)
+      return [key, {
+        score: boundedScore(dimension.score, `${path}.dimensions.${key}.score`),
+        evidence: boundedString(dimension.evidence, `${path}.dimensions.${key}.evidence`, 2000)
+      }]
+    }))
+  }
+}
+
+function validateQcDocument(input) {
+  const text = typeof input === 'string' ? input : JSON.stringify(input)
+  if (new TextEncoder().encode(text).byteLength > MAX_QC_JSON_BYTES) schemaError('$', `JSON exceeds ${MAX_QC_JSON_BYTES} bytes`)
+  let value
+  try { value = typeof input === 'string' ? JSON.parse(input) : input } catch (error) {
+    schemaError('$', `malformed JSON (${error instanceof Error ? error.message : String(error)})`)
+  }
+  exactKeys(value, ['schemaVersion', 'job', 'selectedCandidate', 'candidates', 'generatedAt'], '$')
+  if (value.schemaVersion !== QC_DOCUMENT_SCHEMA_VERSION) schemaError('$.schemaVersion', `must be ${QC_DOCUMENT_SCHEMA_VERSION}`)
+  exactKeys(value.job, ['id', 'state', 'brief', 'createdAt', 'updatedAt'], '$.job')
+  if (!JOB_STATES.includes(value.job.state)) schemaError('$.job.state', `must be one of ${JOB_STATES.join(', ')}`)
+  const job = {
+    id: boundedString(value.job.id, '$.job.id', 128, false),
+    state: value.job.state,
+    brief: boundedString(value.job.brief, '$.job.brief', 8000),
+    createdAt: isoTimestamp(value.job.createdAt, '$.job.createdAt'),
+    updatedAt: isoTimestamp(value.job.updatedAt, '$.job.updatedAt')
+  }
+  if (value.selectedCandidate !== null && !CANDIDATE_IDS.includes(value.selectedCandidate)) schemaError('$.selectedCandidate', 'must be null or A, B, C, D')
+  if (!Array.isArray(value.candidates) || value.candidates.length !== 4) schemaError('$.candidates', 'must contain exactly four candidates')
+  return {
+    schemaVersion: QC_DOCUMENT_SCHEMA_VERSION,
+    job,
+    selectedCandidate: value.selectedCandidate,
+    candidates: value.candidates.map((candidate, index) => validateCandidate(candidate, `$.candidates[${index}]`, CANDIDATE_IDS[index])),
+    generatedAt: isoTimestamp(value.generatedAt, '$.generatedAt')
+  }
+}
+
+function qcDocumentFromState() {
+  return validateQcDocument({
+    schemaVersion: QC_DOCUMENT_SCHEMA_VERSION,
+    job: state.job,
+    selectedCandidate: state.selectedCandidate,
+    candidates: CANDIDATE_IDS.map(id => state.candidates[id]),
+    generatedAt: new Date().toISOString()
+  })
+}
+// WORKBENCH_CORE_END
+
 function setState(patch) {
   state = { ...state, ...patch }
-  pluginContext?.storage.set('workbench.v1', persistedState())
+  pluginContext?.storage.set('workbench.v2', persistedState())
   listeners.forEach(listener => listener())
 }
 
@@ -164,6 +409,7 @@ function mediaKind(url) {
 
 function qcProfileFor(input) {
   const toolName = String(input.toolName || '').toLowerCase()
+  if (toolName.includes('midjourney')) return 'midjourney'
   if (mediaKind(input.src) === 'video' || toolName.includes('generate_video')) return 'higgsfield-video'
   if (toolName.includes('higgsfield')) return 'higgsfield-image'
   return 'design'
@@ -207,7 +453,7 @@ function PanelIntro({ title, description }) {
   })
 }
 
-function BrowserSurface({ url }) {
+function BrowserSurface({ panelId, url }) {
   const kind = mediaKind(url)
   const hasPrivilegedBrowser = Boolean(window.hermesDesktop?.browser?.capture)
 
@@ -235,6 +481,10 @@ function BrowserSurface({ url }) {
     return jsx('webview', {
       allowpopups: 'false',
       partition: 'persist:hermes-browser',
+      ref: element => {
+        if (element) browserWebviews.set(panelId, element)
+        else browserWebviews.delete(panelId)
+      },
       src: url,
       style: { border: 0, display: 'flex', height: '100%', width: '100%' }
     })
@@ -249,7 +499,7 @@ function BrowserSurface({ url }) {
   })
 }
 
-function ViewportStage({ panel }) {
+function ViewportStage({ panel, panelId }) {
   const containerRef = useRef(null)
   const [bounds, setBounds] = useState({ width: 0, height: 0 })
   const viewport = viewportFor(panel)
@@ -268,7 +518,7 @@ function ViewportStage({ panel }) {
     return jsx('div', {
       ref: containerRef,
       style: { height: '100%', minHeight: 0, overflow: 'hidden', width: '100%' },
-      children: jsx(BrowserSurface, { url: panel.url })
+      children: jsx(BrowserSurface, { panelId, url: panel.url })
     })
   }
 
@@ -297,7 +547,7 @@ function ViewportStage({ panel }) {
         transformOrigin: 'center center',
         width: viewport.width
       },
-      children: jsx(BrowserSurface, { url: panel.url })
+      children: jsx(BrowserSurface, { panelId, url: panel.url })
     })
   })
 }
@@ -306,6 +556,7 @@ function BrowserPanel({ panelId, title }) {
   const workbench = useWorkbench()
   const panel = workbench.browserPanels[panelId] || DEFAULT_BROWSER_PANELS[panelId]
   const [draft, setDraft] = useState(panel.url)
+  const [captureStatus, setCaptureStatus] = useState('')
   const viewport = viewportFor(panel)
 
   useEffect(() => setDraft(panel.url), [panel.url])
@@ -314,6 +565,36 @@ function BrowserPanel({ panelId, title }) {
   const setPreset = preset => {
     const dimensions = VIEWPORT_PRESETS[preset] || {}
     setBrowserPanel(panelId, { preset, width: dimensions.width || panel.width, height: dimensions.height || panel.height })
+  }
+  const capturePng = async () => {
+    const browserApi = window.hermesDesktop?.browser
+    const guestId = browserWebviews.get(panelId)?.getWebContentsId?.()
+    if (!browserApi?.capture || !browserApi?.saveCapture || !Number.isInteger(guestId)) {
+      setCaptureStatus('Capture unavailable')
+      return
+    }
+    setCaptureStatus('Capturing…')
+    try {
+      const capture = await browserApi.capture(guestId)
+      if (!capture?.captureId || !Number.isInteger(capture.width) || !Number.isInteger(capture.height)) {
+        throw new Error('Host returned an invalid capture')
+      }
+      const saved = await browserApi.saveCapture(capture.captureId, `${state.job.id || 'midjourney'}-${panelId}.png`)
+      setState({
+        capture: {
+          panelId,
+          width: capture.width,
+          height: capture.height,
+          createdAt: capture.createdAt,
+          path: saved?.canceled ? '' : String(saved?.path || '')
+        }
+      })
+      setCaptureStatus(saved?.canceled ? `Captured ${capture.width}×${capture.height} · save cancelled` : `Saved ${capture.width}×${capture.height}`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setCaptureStatus(message)
+      host.notify({ kind: 'error', message: `Browser capture failed: ${message}` })
+    }
   }
 
   return jsxs('div', {
@@ -394,10 +675,23 @@ function BrowserPanel({ panelId, title }) {
                   })
                 ]
               })
-            : null
+            : null,
+          jsx(Button, {
+            disabled: !panel.url || mediaKind(panel.url) !== 'page' || !window.hermesDesktop?.browser?.capture,
+            onClick: capturePng,
+            size: 'xs',
+            variant: 'outline',
+            children: 'Capture PNG'
+          })
         ]
       }),
-      jsx('div', { style: { flex: 1, minHeight: 0, overflow: 'hidden' }, children: jsx(ViewportStage, { panel }) })
+      captureStatus
+        ? jsx('div', { style: { color: 'var(--ui-text-tertiary)', fontSize: 10, padding: '0 10px 6px' }, children: captureStatus })
+        : null,
+      jsx('div', {
+        style: { flex: 1, minHeight: 0, overflow: 'hidden' },
+        children: jsx(ViewportStage, { panel, panelId })
+      })
     ]
   })
 }
@@ -521,9 +815,258 @@ function CheckRow({ checkId, label, profileId }) {
   })
 }
 
+function dispositionVariant(disposition) {
+  if (disposition === 'PASS') return 'default'
+  if (disposition === 'REJECT') return 'destructive'
+  return 'warn'
+}
+
+function JobEditor({ workbench }) {
+  const updateJob = patch => {
+    const now = new Date().toISOString()
+    setState({ job: { ...workbench.job, ...patch, createdAt: workbench.job.createdAt || now, updatedAt: now } })
+  }
+  const transition = nextState => {
+    const allowed = JOB_TRANSITIONS[workbench.job.state] || []
+    if (!allowed.includes(nextState)) return
+    updateJob({ state: nextState })
+  }
+
+  return jsxs('div', {
+    style: { padding: '10px 12px' },
+    children: [
+      jsxs('div', {
+        style: { alignItems: 'center', display: 'flex', gap: 6 },
+        children: [
+          jsx(Badge, { variant: ['FAILED', 'CANCELLED'].includes(workbench.job.state) ? 'destructive' : 'muted', children: workbench.job.state }),
+          jsx('span', { style: { color: 'var(--ui-text-quaternary)', fontSize: 10 }, children: 'Status only · does not trigger Midjourney actions' })
+        ]
+      }),
+      jsx(Input, {
+        'aria-label': 'Midjourney job ID',
+        onChange: event => updateJob({ id: event.target.value }),
+        placeholder: 'job-id',
+        style: { marginTop: 8 },
+        value: workbench.job.id
+      }),
+      jsx(Textarea, {
+        'aria-label': 'Midjourney job brief',
+        onChange: event => updateJob({ brief: event.target.value }),
+        placeholder: 'Normalized image brief',
+        style: { marginTop: 8, minHeight: 56 },
+        value: workbench.job.brief
+      }),
+      jsx('div', {
+        style: { display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 8 },
+        children: (JOB_TRANSITIONS[workbench.job.state] || []).map(nextState =>
+          jsx(Button, { onClick: () => transition(nextState), size: 'xs', variant: 'outline', children: `Mark ${nextState}` }, nextState)
+        )
+      })
+    ]
+  })
+}
+
+function CandidateCard({ candidate, selected }) {
+  const update = patch => setState({ candidates: { ...state.candidates, [candidate.id]: { ...candidate, ...patch } } })
+  const updateDimension = (key, patch) => update({
+    dimensions: { ...candidate.dimensions, [key]: { ...candidate.dimensions[key], ...patch } }
+  })
+
+  return jsxs('div', {
+    style: {
+      borderBottom: '1px solid var(--ui-stroke-tertiary)',
+      boxShadow: selected ? 'inset 3px 0 0 var(--ui-accent)' : 'none',
+      padding: '10px 12px'
+    },
+    children: [
+      jsxs('div', {
+        style: { alignItems: 'center', display: 'flex', gap: 6 },
+        children: [
+          jsx('strong', { style: { fontSize: 15 }, children: candidate.id }),
+          jsx(Badge, { variant: dispositionVariant(candidate.disposition), children: candidate.disposition }),
+          jsx(Badge, { variant: 'muted', children: `${candidate.score}/100` }),
+          jsx(Button, {
+            onClick: () => setState({ selectedCandidate: candidate.id }),
+            size: 'xs',
+            style: { marginLeft: 'auto' },
+            variant: selected ? 'default' : 'outline',
+            children: selected ? 'Selected' : 'Select'
+          })
+        ]
+      }),
+      jsx(Textarea, {
+        'aria-label': `Candidate ${candidate.id} summary`,
+        onChange: event => update({ summary: event.target.value }),
+        placeholder: 'Candidate summary',
+        style: { marginTop: 8, minHeight: 48 },
+        value: candidate.summary
+      }),
+      jsxs('div', {
+        style: { display: 'grid', gap: 6, gridTemplateColumns: '80px minmax(0, 1fr)', marginTop: 6 },
+        children: [
+          jsx(Input, {
+            'aria-label': `Candidate ${candidate.id} score`,
+            max: 100,
+            min: 0,
+            onChange: event => update({ score: Math.max(0, Math.min(100, Number(event.target.value) || 0)) }),
+            type: 'number',
+            value: candidate.score
+          }),
+          jsx('select', {
+            'aria-label': `Candidate ${candidate.id} disposition`,
+            onChange: event => update({ disposition: event.target.value }),
+            style: {
+              background: 'var(--ui-surface-secondary)', border: '1px solid var(--ui-stroke-secondary)',
+              borderRadius: 5, color: 'var(--ui-text-primary)', padding: '0 6px'
+            },
+            value: candidate.disposition,
+            children: DISPOSITIONS.map(value => jsx('option', { value, children: value }, value))
+          })
+        ]
+      }),
+      jsx(Textarea, {
+        'aria-label': `Candidate ${candidate.id} evidence`,
+        onChange: event => update({ evidence: event.target.value.split('\n').map(item => item.trim()).filter(Boolean).slice(0, 20) }),
+        placeholder: 'Evidence · one item per line',
+        style: { marginTop: 6, minHeight: 48 },
+        value: candidate.evidence.join('\n')
+      }),
+      jsx(Textarea, {
+        'aria-label': `Candidate ${candidate.id} repair prompt`,
+        onChange: event => update({ repairPrompt: event.target.value }),
+        placeholder: 'Repair prompt when disposition is REPAIR',
+        style: { marginTop: 6, minHeight: 48 },
+        value: candidate.repairPrompt
+      }),
+      jsx('div', {
+        style: { display: 'grid', gap: 6, marginTop: 8 },
+        children: QC_PROFILES.midjourney.checks.map(([key, label]) => {
+          const dimension = candidate.dimensions[key] || { score: 0, evidence: '' }
+          return jsxs('div', {
+            style: { alignItems: 'center', display: 'grid', gap: 6, gridTemplateColumns: 'minmax(0, 1fr) 62px' },
+            children: [
+              jsx(Input, {
+                'aria-label': `Candidate ${candidate.id} ${label} evidence`,
+                onChange: event => updateDimension(key, { evidence: event.target.value }),
+                placeholder: `${label} evidence`,
+                value: dimension.evidence
+              }),
+              jsx(Input, {
+                'aria-label': `Candidate ${candidate.id} ${label} score`,
+                max: 100,
+                min: 0,
+                onChange: event => updateDimension(key, { score: Math.max(0, Math.min(100, Number(event.target.value) || 0)) }),
+                type: 'number',
+                value: dimension.score
+              })
+            ]
+          }, key)
+        })
+      })
+    ]
+  })
+}
+
+function MidjourneyQcPane({ workbench }) {
+  const [draft, setDraft] = useState(workbench.qcJson || '')
+  const [importError, setImportError] = useState('')
+  useEffect(() => setDraft(workbench.qcJson || ''), [workbench.qcJson])
+
+  const importQc = () => {
+    try {
+      const document = validateQcDocument(draft)
+      const formatted = JSON.stringify(document, null, 2)
+      setState({
+        job: document.job,
+        candidates: Object.fromEntries(document.candidates.map(candidate => [candidate.id, candidate])),
+        selectedCandidate: document.selectedCandidate,
+        qcJson: formatted,
+        qcProfile: 'midjourney'
+      })
+      setDraft(formatted)
+      setImportError('')
+      host.notify({ kind: 'success', message: `Imported Midjourney QC for ${document.job.id}` })
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error))
+    }
+  }
+  const exportQc = async () => {
+    try {
+      const formatted = JSON.stringify(qcDocumentFromState(), null, 2)
+      setState({ qcJson: formatted })
+      setDraft(formatted)
+      setImportError('')
+      if (typeof navigator.clipboard?.writeText !== 'function') {
+        host.notify({ kind: 'success', message: 'QC JSON exported · clipboard unavailable' })
+        return
+      }
+      try {
+        await navigator.clipboard.writeText(formatted)
+        host.notify({ kind: 'success', message: 'QC JSON exported and copied' })
+      } catch (clipboardError) {
+        const message = clipboardError instanceof Error ? clipboardError.message : String(clipboardError)
+        host.notify({ kind: 'warning', message: `QC JSON exported · clipboard copy failed: ${message}` })
+      }
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
+    children: [
+      jsx(PanelIntro, { title: 'Midjourney QC', description: QC_PROFILES.midjourney.description }),
+      jsx('div', { style: { padding: '0 12px 8px' }, children: jsx(ProfileSelect, { value: workbench.qcProfile }) }),
+      jsx(Separator, {}),
+      jsx(ScrollArea, {
+        style: { flex: 1, minHeight: 0 },
+        children: jsxs('div', {
+          children: [
+            jsx(JobEditor, { workbench }),
+            jsx(Separator, {}),
+            jsxs('div', {
+              style: { padding: '10px 12px' },
+              children: [
+                jsx(Textarea, {
+                  'aria-label': 'Midjourney QC JSON',
+                  onChange: event => setDraft(event.target.value),
+                  placeholder: 'Paste strict schema-version 1 QC JSON',
+                  style: { minHeight: 120 },
+                  value: draft
+                }),
+                importError
+                  ? jsx('div', { role: 'alert', style: { color: 'var(--ui-danger, #f87171)', fontSize: 10, marginTop: 6 }, children: importError })
+                  : null,
+                jsxs('div', {
+                  style: { display: 'flex', gap: 6, marginTop: 8 },
+                  children: [
+                    jsx(Button, { onClick: importQc, size: 'xs', children: 'Import QC JSON' }),
+                    jsx(Button, { onClick: exportQc, size: 'xs', variant: 'outline', children: 'Export QC JSON' })
+                  ]
+                })
+              ]
+            }),
+            workbench.capture
+              ? jsx('div', {
+                  style: { color: 'var(--ui-text-tertiary)', fontSize: 10, padding: '0 12px 10px' },
+                  children: `Capture ${workbench.capture.width}×${workbench.capture.height}${workbench.capture.path ? ` · ${workbench.capture.path}` : ''}`
+                })
+              : null,
+            ...CANDIDATE_IDS.map(id => jsx(CandidateCard, {
+              candidate: workbench.candidates[id],
+              selected: workbench.selectedCandidate === id
+            }, id))
+          ]
+        })
+      })
+    ]
+  })
+}
+
 function QcPane() {
   const workbench = useWorkbench()
   const profile = QC_PROFILES[workbench.qcProfile] || QC_PROFILES.design
+  if (workbench.qcProfile === 'midjourney') return jsx(MidjourneyQcPane, { workbench })
   const values = Object.values(workbench.evaluations[workbench.qcProfile] || {})
   const failed = values.filter(value => value.status === 'fail').length
   const passed = values.filter(value => value.status === 'pass').length
@@ -549,9 +1092,7 @@ function QcPane() {
       jsx(Separator, {}),
       jsx(ScrollArea, {
         style: { flex: 1, minHeight: 0 },
-        children: profile.checks.map(([id, label]) =>
-          jsx(CheckRow, { checkId: id, label, profileId: workbench.qcProfile }, id)
-        )
+        children: profile.checks.map(([id, label]) => jsx(CheckRow, { checkId: id, label, profileId: workbench.qcProfile }, id))
       })
     ]
   })
@@ -563,7 +1104,10 @@ export default {
   version: PLUGIN_VERSION,
   register(ctx) {
     pluginContext = ctx
-    state = restoredState(ctx.storage.get('workbench.v1', DEFAULT_STATE))
+    const savedV2 = ctx.storage.get('workbench.v2', null)
+    const savedV1 = ctx.storage.get('workbench.v1', DEFAULT_STATE)
+    state = restoredState(savedV2 || savedV1)
+    if (!savedV2) ctx.storage.set('workbench.v2', persistedState())
 
     ctx.registerMany([
       {

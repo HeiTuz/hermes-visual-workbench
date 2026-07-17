@@ -1,7 +1,7 @@
 {
   "name": "hermes-visual-workbench",
-  "version": "0.1.0",
-  "description": "Independent Browser and task-aware QC panes for Hermes Desktop",
+  "version": "0.2.0",
+  "description": "Midjourney A/B/C/D QC and independent Browser panes for Hermes Desktop",
   "type": "module",
   "bin": {
     "hermes-visual-workbench": "scripts/install.mjs"
@@ -9,12 +9,15 @@
   "files": [
     "plugin.js",
     "manifest.json",
+    "skill/",
+    "fixtures/",
     "scripts/",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --check plugin.js && node --test tests/*.test.mjs"
+    "test": "node --check plugin.js && node --test tests/*.test.mjs",
+    "fixture:e2e": "node scripts/fixture-e2e.mjs"
   },
   "engines": {
     "node": ">=18"
@@ -32,6 +35,7 @@
     "hermes-desktop",
     "browser",
     "quality-control",
+    "midjourney",
     "plugin"
   ],
   "author": "HeiTuz",

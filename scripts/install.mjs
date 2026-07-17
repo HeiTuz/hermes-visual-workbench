@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, mkdir, readFile, rm } from 'node:fs/promises'
+import { access, lstat, mkdir, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import {
@@ -11,6 +11,7 @@ import {
   parseArgs,
   readJson,
   sha256,
+  skillDirectory,
   targetDirectory
 } from './lib.mjs'
 
@@ -18,14 +19,15 @@ const usage = `Hermes Visual Workbench installer
 
 Usage:
   hermes-visual-workbench [--hermes-home PATH]
-  hermes-visual-workbench --target PLUGIN_DIRECTORY
+  hermes-visual-workbench --target PLUGIN_DIRECTORY --skill-target SKILL_DIRECTORY
   hermes-visual-workbench --uninstall [--force]
 
 Options:
   --hermes-home PATH  Hermes home (default: HERMES_HOME or ~/.hermes)
   --target PATH       Exact plugin installation directory
-  --uninstall         Remove the managed plugin
-  --force             Uninstall even when plugin.js was modified
+  --skill-target PATH Exact workflow skill installation directory
+  --uninstall         Remove all managed files
+  --force             Uninstall even when a managed file was modified
   --help              Show this help
 `
 
@@ -38,11 +40,50 @@ async function exists(path) {
   }
 }
 
-async function uninstall(target, options) {
+async function readManagedFile(path) {
+  try {
+    const info = await lstat(path)
+    if (!info.isFile()) throw new Error(`Managed path must be a regular file: ${path}`)
+    return await readFile(path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function expectedManagedFiles(target, skillTarget) {
+  return [
+    { id: 'plugin', path: join(target, 'plugin.js') },
+    { id: 'skill', path: join(skillTarget, 'SKILL.md') }
+  ]
+}
+
+function validatedMarkerFiles(marker, expected) {
+  if (marker?.sha256 && !marker?.files) {
+    if (!/^[a-f0-9]{64}$/.test(marker.sha256)) throw new Error('Installation marker has an invalid plugin hash')
+    return [{ ...expected[0], sha256: marker.sha256 }]
+  }
+  if (!Array.isArray(marker?.files) || marker.files.length !== expected.length) {
+    throw new Error('Installation marker has an incomplete managed file list')
+  }
+
+  return expected.map(file => {
+    const matches = marker.files.filter(candidate => candidate?.id === file.id)
+    if (matches.length !== 1) throw new Error(`Installation marker is missing or duplicates managed file: ${file.id}`)
+    const [entry] = matches
+    if (entry.path !== file.path) throw new Error(`Installation marker has an invalid managed path for ${file.id}`)
+    if (!/^[a-f0-9]{64}$/.test(entry.sha256)) throw new Error(`Installation marker has an invalid hash for ${file.id}`)
+    return { ...file, sha256: entry.sha256 }
+  })
+}
+
+async function uninstall(target, skillTarget, options) {
   const pluginPath = join(target, 'plugin.js')
   const markerPath = join(target, MARKER_NAME)
+  const expected = expectedManagedFiles(target, skillTarget)
+  const skillPath = expected[1].path
 
-  if (!(await exists(pluginPath))) {
+  if (!(await exists(pluginPath)) && !(await exists(skillPath)) && !(await exists(markerPath))) {
     console.log(`Visual Workbench is not installed at ${target}`)
     return
   }
@@ -50,53 +91,102 @@ async function uninstall(target, options) {
   let marker = null
   if (await exists(markerPath)) {
     try {
-      marker = await readJson(markerPath)
+      marker = JSON.parse((await readManagedFile(markerPath)).toString('utf8'))
     } catch {
       marker = null
     }
   }
 
-  const currentHash = sha256(await readFile(pluginPath))
-  if (!options.force && (!marker?.sha256 || marker.sha256 !== currentHash)) {
-    throw new Error('Refusing to remove a modified or unmanaged plugin.js. Re-run with --force to remove it.')
+  if (!options.force && !marker) {
+    throw new Error(`No managed installation marker at ${markerPath}. Re-run with --force to remove it.`)
   }
-
-  await rm(pluginPath, { force: true })
+  let files
+  if (options.force) {
+    files = expected
+  } else {
+    files = validatedMarkerFiles(marker, expected)
+  }
+  if (!options.force) {
+    for (const file of files) {
+      const current = await readManagedFile(file.path)
+      if (!current) continue
+      const currentHash = sha256(current)
+      if (currentHash !== file.sha256) {
+        throw new Error(`Refusing to remove locally modified managed file: ${file.path}. Re-run with --force if intentional.`)
+      }
+    }
+  }
+  for (const file of files) await rm(file.path, { force: true })
   await rm(markerPath, { force: true })
+  await rm(skillTarget, { force: true, recursive: false }).catch(() => {})
   console.log(`Removed Visual Workbench from ${target}`)
 }
 
-async function install(target) {
-  const sourcePath = join(PACKAGE_ROOT, 'plugin.js')
+async function install(target, skillTarget) {
   const packageJson = await readJson(join(PACKAGE_ROOT, 'package.json'))
-  const source = await readFile(sourcePath)
-  const sourceHash = sha256(source)
-  const pluginPath = join(target, 'plugin.js')
   const markerPath = join(target, MARKER_NAME)
+  const managed = expectedManagedFiles(target, skillTarget).map(file => ({
+    ...file,
+    sourcePath: file.id === 'plugin' ? join(PACKAGE_ROOT, 'plugin.js') : join(PACKAGE_ROOT, 'skill', 'SKILL.md')
+  }))
 
-  await mkdir(target, { recursive: true })
-
-  if (await exists(pluginPath)) {
-    const currentHash = sha256(await readFile(pluginPath))
-    if (currentHash === sourceHash) {
-      await atomicWrite(
-        markerPath,
-        `${JSON.stringify({ installedAt: new Date().toISOString(), package: packageJson.name, sha256: sourceHash, version: packageJson.version }, null, 2)}\n`
-      )
-      console.log(`Visual Workbench ${packageJson.version} is already current at ${target}`)
-      return
-    }
-
-    const backup = await backupFile(pluginPath, join(target, 'backups'))
-    console.log(`Backed up existing plugin to ${backup}`)
+  await Promise.all([mkdir(target, { recursive: true }), mkdir(skillTarget, { recursive: true })])
+  const markerBefore = await readManagedFile(markerPath)
+  const plans = []
+  for (const file of managed) {
+    const [source, current] = await Promise.all([readFile(file.sourcePath), readManagedFile(file.path)])
+    plans.push({ ...file, source, sourceHash: sha256(source), current })
   }
 
-  await atomicWrite(pluginPath, source)
-  await atomicWrite(
-    markerPath,
-    `${JSON.stringify({ installedAt: new Date().toISOString(), package: packageJson.name, sha256: sourceHash, version: packageJson.version }, null, 2)}\n`
-  )
-  console.log(`Installed Visual Workbench ${packageJson.version} to ${target}`)
+  const files = []
+  let changed = false
+  for (const file of plans) {
+    if (file.current) {
+      const currentHash = sha256(file.current)
+      if (currentHash !== file.sourceHash) {
+        const backup = await backupFile(file.path, join(target, 'backups', file.id))
+        console.log(`Backed up existing ${file.id} to ${backup}`)
+        changed = true
+      }
+    } else {
+      changed = true
+    }
+    files.push({ id: file.id, path: file.path, sha256: file.sourceHash })
+  }
+
+  const applied = []
+  try {
+    for (const file of plans) {
+      await atomicWrite(file.path, file.source)
+      applied.push(file)
+    }
+    await atomicWrite(
+      markerPath,
+      `${JSON.stringify({ schemaVersion: 2, installedAt: new Date().toISOString(), package: packageJson.name, version: packageJson.version, files }, null, 2)}\n`
+    )
+  } catch (installError) {
+    const rollbackErrors = []
+    for (const file of [...applied].reverse()) {
+      try {
+        if (file.current) await atomicWrite(file.path, file.current)
+        else await rm(file.path, { force: true })
+      } catch (rollbackError) {
+        rollbackErrors.push(`${file.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
+      }
+    }
+    try {
+      if (markerBefore) await atomicWrite(markerPath, markerBefore)
+      else await rm(markerPath, { force: true })
+    } catch (rollbackError) {
+      rollbackErrors.push(`${markerPath}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
+    }
+    const suffix = rollbackErrors.length
+      ? ` Rollback also failed: ${rollbackErrors.join('; ')}`
+      : ' Previous managed files were restored.'
+    throw new Error(`Installation failed: ${installError instanceof Error ? installError.message : String(installError)}.${suffix}`)
+  }
+  console.log(`${changed ? 'Installed' : 'Verified'} Visual Workbench ${packageJson.version} at ${target}`)
+  console.log(`Installed Midjourney workflow skill to ${skillTarget}`)
 }
 
 try {
@@ -105,8 +195,9 @@ try {
     process.stdout.write(usage)
   } else {
     const target = targetDirectory(options)
-    if (options.uninstall) await uninstall(target, options)
-    else await install(target)
+    const skillTarget = skillDirectory(options)
+    if (options.uninstall) await uninstall(target, skillTarget, options)
+    else await install(target, skillTarget)
   }
 } catch (error) {
   console.error(`hermes-visual-workbench: ${error instanceof Error ? error.message : String(error)}`)

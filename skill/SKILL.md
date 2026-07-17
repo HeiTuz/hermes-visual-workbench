@@ -1,7 +1,7 @@
 ---
 name: midjourney-visual-workbench
 description: Prepare, capture, QC, select, and optionally upscale Midjourney results in Hermes Desktop without touching cookies or spending credits without current-turn approval.
-version: 0.3.0
+version: 0.5.1
 platforms: [macos]
 metadata:
   hermes:
@@ -41,11 +41,11 @@ Any nonterminal state may terminate as `FAILED` or `CANCELLED`. Do not skip live
 4. Before the first submit click, re-read the current user turn. Without explicit approval, stop at `READY` and report that no credits were spent.
 5. With approval, keep every background pointer/focus/type action scoped to `app="Hermes"` and the internal Browser pane. After the submit event, write a duplicate-prevention marker before any retry. If acknowledgement is uncertain, stop and inspect; never click submit again blindly.
 6. Detect completion from fresh rendered screenshots with bounded polling. Do not rely on sleep alone.
-7. Use the Browser pane's **Capture PNG** action or a background window screenshot. Save/copy the capture under the job artifact directory.
+7. In the Browser pane, press **Review in QC** on the Result target. Confirm **Inspection status** shows `LINKED`, the same Midjourney URL, viewport, and Fit/Actual mode, plus `READ ONLY`. Press **Capture evidence** there (or **Capture PNG** when a saved file is required); confirm `CAPTURE READY` and that the evidence dimensions belong to that same URL before copying a saved capture under the job artifact directory.
 8. Analyze the visible four-cell grid with Hermes vision. Label candidates in reading order: A top-left, B top-right, C bottom-left, D bottom-right.
 9. Score all eight dimensions from 0–100: prompt fidelity, composition, identity/reference fidelity, anatomy/geometry, artifacts, typography, color/material fidelity, production readiness.
 10. Assign each candidate exactly one disposition: `PASS`, `REPAIR`, or `REJECT`. Record concise evidence and a repair prompt when repairable.
-11. Produce strict QC JSON matching Visual Workbench schema version 1. Open the Quality Control pane, select **Midjourney QC**, paste into **Import QC JSON**, and press **Import QC JSON**. Confirm the four candidates and selected recommendation render.
+11. Produce strict QC JSON matching Visual Workbench schema version 1. In the already-linked Quality Control pane, confirm **Midjourney QC**, paste into **Import QC JSON**, and press **Import QC JSON**. Confirm the target card, capture evidence, four candidates, and selected recommendation render together.
 12. Recommend one candidate. Upscale or vary only with fresh explicit approval. Download/attach only the chosen result and record visible result references plus local paths.
 
 ## Strict QC document

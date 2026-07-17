@@ -9,9 +9,11 @@ import {
   migratePersistedState,
   PROVIDER_IDS,
   PROVIDERS,
+  providerEvidenceFor,
   providerForProfile,
   QC_DIMENSIONS,
   QC_PROFILE_IDS,
+  qcProfileFor,
   validateQcDocument
 } from '../scripts/qc-core.mjs'
 
@@ -48,7 +50,7 @@ function loadRuntimeCore() {
   assert.notEqual(finish, -1, 'plugin core end marker is missing')
   assert.ok(finish > start, 'plugin core markers are out of order')
   const source = pluginSource.slice(start + begin.length, finish)
-  return Function(`${source}\nreturn { DEFAULT_STATE, restoredState, validateQcDocument, PROVIDERS, PROVIDER_IDS, providerForProfile }`)()
+  return Function(`${source}\nreturn { DEFAULT_STATE, persistedState, restoredState, validateQcDocument, PROVIDERS, PROVIDER_IDS, providerEvidenceFor, providerForProfile, qcProfileFor, setRuntimeState(value) { state = { ...DEFAULT_STATE, ...value } } }`)()
 }
 
 function serializableProvider(provider) {
@@ -88,8 +90,13 @@ test('runtime plugin validator stays behaviorally aligned with the standalone QC
 test('runtime persisted-state restore repairs malformed and partial candidate data', () => {
   const runtime = loadRuntimeCore()
   const saved = {
+    qcTargetPanelId: 'bogus',
     qcProfile: 'unknown-profile',
     job: { id: 42, state: 'UNKNOWN', brief: null },
+    browserPanels: {
+      result: { displayMode: 'actual' },
+      reference: { displayMode: 'unknown' }
+    },
     candidates: {
       A: {
         evidence: 'not-an-array',
@@ -101,11 +108,39 @@ test('runtime persisted-state restore repairs malformed and partial candidate da
 
   assert.deepEqual(restored, migratePersistedState(saved, runtime.DEFAULT_STATE))
   assert.equal(restored.qcProfile, 'design')
+  assert.equal(restored.qcTargetPanelId, 'result')
   assert.equal(restored.job.id, '')
   assert.equal(restored.job.state, 'DRAFT')
+  assert.equal(restored.browserPanels.result.displayMode, 'actual')
+  assert.equal(restored.browserPanels.reference.displayMode, 'fit')
   assert.deepEqual(restored.candidates.A.evidence, [])
   assert.equal(restored.candidates.A.dimensions.composition.score, 88)
   assert.equal(restored.candidates.A.dimensions.promptFidelity.score, 0)
+})
+
+test('runtime persistence drops ephemeral captures and preserves durable provenance', () => {
+  const runtime = loadRuntimeCore()
+  const capture = {
+    panelId: 'result',
+    url: 'https://example.test/result',
+    width: 768,
+    height: 1024,
+    createdAt: 1_752_710_400_000,
+    path: ''
+  }
+  runtime.setRuntimeState({ capture })
+  assert.equal(runtime.persistedState().capture, null)
+
+  const durable = { ...capture, path: '/tmp/result.png' }
+  runtime.setRuntimeState({ capture: durable })
+  assert.deepEqual(runtime.persistedState().capture, durable)
+
+  const restored = runtime.restoredState({
+    browserPanels: { result: { qcProfileHint: 'higgsfield-image' } },
+    capture: durable
+  })
+  assert.equal(restored.browserPanels.result.qcProfileHint, 'higgsfield-image')
+  assert.equal(restored.capture.createdAt, durable.createdAt)
 })
 
 test('runtime provider registry stays behaviorally aligned with the standalone QC core', () => {
@@ -122,4 +157,55 @@ test('runtime provider registry stays behaviorally aligned with the standalone Q
   assert.deepEqual(runtime.PROVIDERS.midjourney.qcDocument.validate(document), PROVIDERS.midjourney.qcDocument.validate(document))
   assert.equal(PROVIDERS.midjourney.qcDocument.validate, validateQcDocument, 'standalone adapter must reuse the schema-v1 validator')
   assert.equal(runtime.PROVIDERS.midjourney.qcDocument.validate, runtime.validateQcDocument, 'runtime adapter must reuse the schema-v1 validator')
+})
+
+test('runtime Higgsfield MCP provenance extraction stays aligned with the standalone QC core', () => {
+  const runtime = loadRuntimeCore()
+  const input = {
+    src: 'https://cdn.example.test/result.mp4',
+    toolName: 'mcp__higgsfield__show_generations',
+    toolResult: {
+      structuredContent: {
+        items: [{
+          id: 'video-job', model: 'seedance_2_0', status: 'completed', type: 'video',
+          params: { aspect_ratio: '9:16', duration: 5, resolution: '720p' },
+          results: { rawUrl: 'https://cdn.example.test/result.mp4' }
+        }]
+      }
+    }
+  }
+
+  const actual = runtime.providerEvidenceFor(input)
+  const expected = providerEvidenceFor(input)
+  assert.deepEqual({ ...actual, checkedAt: '' }, { ...expected, checkedAt: '' })
+})
+
+test('runtime QC target routing and Browser-to-QC controls stay connected', () => {
+  const runtime = loadRuntimeCore()
+  for (const input of [
+    { src: 'https://www.midjourney.com/explore' },
+    { src: 'https://cdn.example.test/grid.png', toolName: 'midjourney' },
+    { src: 'https://cdn.example.test/clip.mp4' },
+    { src: 'https://example.test/page' }
+  ]) {
+    assert.equal(runtime.qcProfileFor(input), qcProfileFor(input))
+  }
+  assert.match(pluginSource, /children: workbench\.qcTargetPanelId === panelId \? 'QC Linked' : 'Review in QC'/)
+  assert.match(pluginSource, /children: linkedCapture \? 'Refresh evidence' : 'Capture evidence'/)
+  assert.match(pluginSource, /pluginContext\?\.storage\.set\('workbench\.v5'/)
+  assert.match(pluginSource, /element\.addEventListener\('did-navigate', syncUrl\)/)
+  assert.match(pluginSource, /browserSplit: panelId === 'reference' \? true : state\.browserSplit/)
+  assert.match(pluginSource, /children: 'Inspection status'/)
+  assert.match(pluginSource, /label: 'MCP metadata'/)
+  assert.match(pluginSource, /children: 'Run page checks'/)
+  assert.match(pluginSource, /value: 'READ ONLY'/)
+  assert.match(pluginSource, /providerEvidence: providerEvidenceFor\(input\)/)
+  assert.match(pluginSource, /children: reviewed \? candidate\.disposition : 'UNREVIEWED'/)
+  assert.match(pluginSource, /reviewContextMatches\(workbench, profileId\)/)
+  assert.match(pluginSource, /Page checks returned incomplete CDP audit data/)
+  assert.match(pluginSource, /browserApi\.audit\(guestId\)/)
+  assert.doesNotMatch(pluginSource, /Runtime\.evaluate/)
+  assert.match(pluginSource, /preserveProviderEvidence: preserveProvenance/)
+  assert.match(pluginSource, /reviewContextMatches\(state, 'design'\) \? \{ \.\.\.\(state\.evaluations\.design \|\| \{\}\) \} : \{\}/)
+  assert.match(pluginSource, /hasReviewContext \? \{\} : \{ candidates: blankCandidates\(\), selectedCandidate: null, qcJson: '' \}/)
 })

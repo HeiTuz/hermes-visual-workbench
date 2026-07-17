@@ -26,6 +26,12 @@ Visual Workbench keeps the product workflow in a runtime plugin while Hermes cor
 - Strict 64 KiB-bounded QC JSON import/export with unknown-field and score-range rejection.
 - Persisted, versioned job state (`DRAFT` through `ATTACHED`, plus terminal failure/cancel states).
 - Native **Capture PNG** affordance for the secure persistent Browser guest.
+- Explicit **Review in QC** routing from either Result or Reference, with the linked URL, viewport, Fit/Actual mode, CDP metrics, and matching capture evidence visible in every QC profile.
+- A persistent **Inspection status** block in every profile shows target, capture, live target check, review progress, selection state, and provider execution mode instead of leaving blank checks ambiguous.
+- Higgsfield image/video results opened from a Higgsfield MCP tool card carry bounded read-only provenance into QC: job ID, status, model, media type, prompt, dimensions, duration/ratio/resolution, result URL, batch size, and reference count. The plugin never submits or polls a generation itself.
+- Higgsfield structured results render their real batch count (up to A–D) instead of forcing four empty candidate cards; Midjourney remains strict A/B/C/D and visibly read-only.
+- Design QC can run a non-mutating CDP page preflight for current-viewport horizontal overflow, broken images, missing alt text, and unlabeled controls; visual contrast and aesthetic judgments remain manual.
+- Capture evidence is invalidated when its Browser URL changes, preventing a stale screenshot from being presented as proof for a new target.
 - Packaged `midjourney-visual-workbench` Hermes workflow skill and deterministic non-billable fixture runner.
 
 The preview is scaled to fit its pane, but the guest page still receives the selected viewport as its real `window.innerWidth` / `window.innerHeight`.

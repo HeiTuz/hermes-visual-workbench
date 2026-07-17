@@ -1,4 +1,4 @@
-export const PERSISTED_SCHEMA_VERSION = 2
+export const PERSISTED_SCHEMA_VERSION = 5
 export const QC_DOCUMENT_SCHEMA_VERSION = 1
 export const MAX_QC_JSON_BYTES = 64 * 1024
 export const CANDIDATE_IDS = Object.freeze(['A', 'B', 'C', 'D'])
@@ -72,6 +72,143 @@ function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 }
 
+function boundedMetadataString(value, max = 4000) {
+  return typeof value === 'string' ? value.slice(0, max) : ''
+}
+
+function parsedRecord(value) {
+  if (isRecord(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return null
+  try {
+    const parsed = JSON.parse(value)
+    return isRecord(parsed) || Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function providerRecords(value, depth = 0, seen = new Set()) {
+  if (depth > 4 || value === null || value === undefined) return []
+  if (typeof value === 'string') {
+    const parsed = parsedRecord(value)
+    return parsed ? providerRecords(parsed, depth + 1, seen) : []
+  }
+  if (Array.isArray(value)) return value.flatMap(item => providerRecords(item, depth + 1, seen))
+  if (!isRecord(value) || seen.has(value)) return []
+  seen.add(value)
+  const looksLikeGeneration = Boolean(
+    value.id || value.jobId || value.job_id || value.model || value.params || value.status || value.type
+  )
+  const nested = ['structuredContent', 'result', 'data', 'items', 'generations', 'jobs']
+    .flatMap(key => providerRecords(value[key], depth + 1, seen))
+  return looksLikeGeneration ? [value, ...nested] : nested
+}
+
+function resultUrls(record) {
+  const urls = []
+  const add = value => {
+    if (typeof value === 'string' && /^(?:https?|file|data):/i.test(value)) urls.push(value)
+  }
+  add(record.url)
+  add(record.resultUrl)
+  add(record.result_url)
+  const results = isRecord(record.results) ? record.results : {}
+  add(results.rawUrl)
+  add(results.minUrl)
+  add(results.url)
+  if (Array.isArray(record.outputs)) record.outputs.forEach(output => isRecord(output) && add(output.url))
+  return [...new Set(urls)]
+}
+
+function comparableUrl(value) {
+  return String(value || '').split(/[?#]/, 1)[0]
+}
+
+export function restoredProviderEvidence(value) {
+  if (!isRecord(value) || value.source !== 'higgsfield-mcp') return null
+  const width = Number.isFinite(value.width) && value.width > 0 ? Math.round(value.width) : 0
+  const height = Number.isFinite(value.height) && value.height > 0 ? Math.round(value.height) : 0
+  const duration = Number.isFinite(value.duration) && value.duration > 0 ? value.duration : 0
+  const count = Number.isInteger(value.count) && value.count > 0 ? Math.min(value.count, 20) : 1
+  const referenceCount = Number.isInteger(value.referenceCount) && value.referenceCount >= 0 ? Math.min(value.referenceCount, 20) : 0
+  return {
+    source: 'higgsfield-mcp',
+    jobId: boundedMetadataString(value.jobId, 128),
+    status: boundedMetadataString(value.status, 64),
+    model: boundedMetadataString(value.model, 128),
+    mediaType: ['image', 'video', 'audio', '3d'].includes(value.mediaType) ? value.mediaType : '',
+    prompt: boundedMetadataString(value.prompt),
+    width,
+    height,
+    duration,
+    aspectRatio: boundedMetadataString(value.aspectRatio, 32),
+    resolution: boundedMetadataString(value.resolution, 32),
+    count,
+    referenceCount,
+    resultUrl: boundedMetadataString(value.resultUrl, 4096),
+    createdAt: typeof value.createdAt === 'string' || Number.isFinite(value.createdAt) ? value.createdAt : '',
+    checkedAt: boundedMetadataString(value.checkedAt, 64)
+  }
+}
+
+export function providerEvidenceFor(input = {}) {
+  const toolName = String(input.toolName || '').toLowerCase()
+  if (!toolName.includes('higgsfield')) return null
+  const records = providerRecords(input.toolResult)
+  const src = String(input.src || '')
+  const matching = records.filter(record => resultUrls(record).some(url => comparableUrl(url) === comparableUrl(src)))
+  const recordsWithUrls = records.filter(record => resultUrls(record).length > 0)
+  const record = matching[0] || (recordsWithUrls.length === 0 && records.length === 1 ? records[0] : null)
+  if (!record) return null
+  const params = isRecord(record.params) ? record.params : {}
+  const urls = resultUrls(record)
+  const mediaType = ['image', 'video', 'audio', '3d'].includes(record.type)
+    ? record.type
+    : /\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) ? 'video' : 'image'
+  return restoredProviderEvidence({
+    source: 'higgsfield-mcp',
+    jobId: record.id || record.jobId || record.job_id || '',
+    status: record.status || '',
+    model: record.model || params.model || '',
+    mediaType,
+    prompt: params.prompt || record.prompt || '',
+    width: params.width || record.width || 0,
+    height: params.height || record.height || 0,
+    duration: params.duration || record.duration || 0,
+    aspectRatio: params.aspect_ratio || record.aspect_ratio || '',
+    resolution: params.resolution || record.resolution || '',
+    count: params.batch_size || params.count || record.count || 1,
+    referenceCount: Array.isArray(params.medias) ? params.medias.length : 0,
+    resultUrl: urls.find(url => comparableUrl(url) === comparableUrl(src)) || urls[0] || src,
+    createdAt: record.createdAt || record.created_at || '',
+    checkedAt: new Date().toISOString()
+  })
+}
+
+function restoredInspection(value) {
+  if (!isRecord(value)) return null
+  return {
+    url: boundedMetadataString(value.url, 4096),
+    summary: boundedMetadataString(value.summary, 1000),
+    checkedAt: boundedMetadataString(value.checkedAt, 64)
+  }
+}
+
+function restoredReviewContext(value) {
+  if (!isRecord(value) || !QC_PROFILE_IDS.includes(value.profileId) || !['result', 'reference'].includes(value.panelId)) return null
+  const url = boundedMetadataString(value.url, 4096)
+  return url ? { profileId: value.profileId, panelId: value.panelId, url } : null
+}
+
+export function reviewContextMatches(current, profileId) {
+  const panelId = current.qcTargetPanelId || 'result'
+  const panel = current.browserPanels[panelId]
+  return Boolean(
+    panel?.url && current.reviewContext?.profileId === profileId && current.reviewContext?.panelId === panelId &&
+    current.reviewContext?.url === panel.url
+  )
+}
+
 function restoredDimension(value) {
   const source = isRecord(value) ? value : {}
   return {
@@ -113,7 +250,11 @@ function restoredPanel(value, defaults, legacyUrl = '') {
     url: typeof source.url === 'string' ? source.url : legacyUrl,
     preset: typeof source.preset === 'string' ? source.preset : defaults.preset,
     width: Number.isFinite(source.width) && source.width >= 240 ? source.width : defaults.width,
-    height: Number.isFinite(source.height) && source.height >= 240 ? source.height : defaults.height
+    height: Number.isFinite(source.height) && source.height >= 240 ? source.height : defaults.height,
+    displayMode: source.displayMode === 'actual' ? 'actual' : 'fit',
+    qcProfileHint: QC_PROFILE_IDS.includes(source.qcProfileHint) ? source.qcProfileHint : defaults.qcProfileHint,
+    providerEvidence: restoredProviderEvidence(source.providerEvidence),
+    inspection: restoredInspection(source.inspection)
   }
 }
 
@@ -135,11 +276,13 @@ function restoredEvaluations(value) {
 function restoredCapture(value) {
   if (!isRecord(value) || !['result', 'reference'].includes(value.panelId)) return null
   if (!Number.isInteger(value.width) || value.width <= 0 || !Number.isInteger(value.height) || value.height <= 0) return null
+  if (typeof value.path !== 'string' || !value.path) return null
   return {
     panelId: value.panelId,
+    url: typeof value.url === 'string' ? value.url : '',
     width: value.width,
     height: value.height,
-    createdAt: typeof value.createdAt === 'string' ? value.createdAt : '',
+    createdAt: Number.isFinite(value.createdAt) ? value.createdAt : typeof value.createdAt === 'string' ? value.createdAt : '',
     path: typeof value.path === 'string' ? value.path : ''
   }
 }
@@ -272,6 +415,8 @@ export function migratePersistedState(saved, defaults) {
       result: restoredPanel(source.browserPanels?.result, defaults.browserPanels.result, legacyUrl),
       reference: restoredPanel(source.browserPanels?.reference, defaults.browserPanels.reference)
     },
+    qcTargetPanelId: ['result', 'reference'].includes(source.qcTargetPanelId) ? source.qcTargetPanelId : 'result',
+    reviewContext: restoredReviewContext(source.reviewContext),
     qcProfile: QC_PROFILE_IDS.includes(source.qcProfile) ? source.qcProfile : defaults.qcProfile,
     evaluations: restoredEvaluations(source.evaluations),
     job: restoredJob(source.job),
@@ -284,7 +429,7 @@ export function migratePersistedState(saved, defaults) {
 
 // Provider descriptor registry. Midjourney is the first adapter: its QC wire
 // format is the frozen schema-v1 document contract (`validateQcDocument`).
-// Descriptor dimensions MUST be drawn from the persisted schema-v2 candidate
+// Descriptor dimensions MUST be drawn from the persisted schema-v5 candidate
 // dimension vocabulary (`QC_DIMENSIONS`) so structured review state stays
 // storable without a persisted-schema bump; `assertProviderRegistry` enforces
 // this at module init.
@@ -373,4 +518,20 @@ export function providerForProfile(profileId) {
     if (PROVIDERS[providerId].profileId === profileId) return PROVIDERS[providerId]
   }
   return null
+}
+
+export function qcProfileFor(input = {}) {
+  const src = String(input.src || '')
+  const toolName = String(input.toolName || '').toLowerCase()
+  let hostname = ''
+  try { hostname = new URL(src).hostname.toLowerCase() } catch {}
+  if (hostname === 'midjourney.com' || hostname.endsWith('.midjourney.com')) return 'midjourney'
+
+  const matches = PROVIDER_IDS
+    .map(providerId => PROVIDERS[providerId])
+    .filter(provider => provider.chatImageToolNames.some(name => toolName.includes(name)))
+  const wireProvider = matches.find(provider => provider.qcDocument)
+  if (wireProvider) return wireProvider.profileId
+  if (/\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) || toolName.includes('generate_video')) return 'higgsfield-video'
+  return matches.length ? matches[0].profileId : 'design'
 }

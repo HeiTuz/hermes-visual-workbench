@@ -9,11 +9,16 @@ import {
   MAX_QC_JSON_BYTES,
   migratePersistedState,
   nextJobStates,
+  PERSISTED_SCHEMA_VERSION,
   PROVIDER_IDS,
   PROVIDERS,
+  providerEvidenceFor,
   providerForProfile,
   QC_DIMENSIONS,
   qcDocumentFromState,
+  qcProfileFor,
+  reviewContextMatches,
+  restoredProviderEvidence,
   transitionJob,
   validateQcDocument
 } from '../scripts/qc-core.mjs'
@@ -76,31 +81,34 @@ test('enforces bounded job transitions', () => {
 
 test('migrates v0.1 persisted state without losing browser and evaluation data', () => {
   const defaults = {
-    schemaVersion: 2,
+    schemaVersion: PERSISTED_SCHEMA_VERSION,
     browserSplit: false,
     browserPanels: {
-      result: { url: '', preset: 'desktop', width: 1440, height: 900 },
-      reference: { url: '', preset: 'mobile', width: 390, height: 844 }
+      result: { url: '', preset: 'desktop', width: 1440, height: 900, displayMode: 'fit', qcProfileHint: '' },
+      reference: { url: '', preset: 'mobile', width: 390, height: 844, displayMode: 'fit', qcProfileHint: '' }
     },
-    qcProfile: 'design', evaluations: {}, job: blankJob(), candidates: blankCandidates(), selectedCandidate: null
+    qcTargetPanelId: 'result', qcProfile: 'design', evaluations: {}, job: blankJob(), candidates: blankCandidates(), selectedCandidate: null
   }
   const legacy = { browserUrl: 'https://example.test', qcProfile: 'higgsfield-image', evaluations: { design: { composition: { status: 'pass', note: 'kept' } } } }
   const migrated = migratePersistedState(legacy, defaults)
-  assert.equal(migrated.schemaVersion, 2)
+  assert.equal(migrated.schemaVersion, PERSISTED_SCHEMA_VERSION)
+  assert.equal(migrated.qcTargetPanelId, 'result')
   assert.equal(migrated.browserPanels.result.url, 'https://example.test')
+  assert.equal(migrated.browserPanels.result.displayMode, 'fit')
+  assert.equal(migrated.browserPanels.reference.displayMode, 'fit')
   assert.equal(migrated.evaluations.design.composition.note, 'kept')
   assert.deepEqual(Object.keys(migrated.candidates), CANDIDATE_IDS)
 })
 
 test('repairs malformed persisted candidate fields and deep-merges partial dimensions', () => {
   const defaults = {
-    schemaVersion: 2,
+    schemaVersion: PERSISTED_SCHEMA_VERSION,
     browserSplit: false,
     browserPanels: {
-      result: { url: '', preset: 'desktop', width: 1440, height: 900 },
-      reference: { url: '', preset: 'mobile', width: 390, height: 844 }
+      result: { url: '', preset: 'desktop', width: 1440, height: 900, displayMode: 'fit', qcProfileHint: '' },
+      reference: { url: '', preset: 'mobile', width: 390, height: 844, displayMode: 'fit', qcProfileHint: '' }
     },
-    qcProfile: 'design', evaluations: {}, job: blankJob(), candidates: blankCandidates(), selectedCandidate: null,
+    qcTargetPanelId: 'result', reviewContext: null, qcProfile: 'design', evaluations: {}, job: blankJob(), candidates: blankCandidates(), selectedCandidate: null,
     qcJson: '', capture: null
   }
   const migrated = migratePersistedState({
@@ -133,26 +141,26 @@ test('exports current state through the same strict validator', () => {
   assert.deepEqual(qcDocumentFromState(state, NOW), source)
 })
 
-function v2Defaults() {
+function v5Defaults() {
   return {
-    schemaVersion: 2,
+    schemaVersion: PERSISTED_SCHEMA_VERSION,
     browserSplit: false,
     browserPanels: {
-      result: { url: '', preset: 'desktop', width: 1440, height: 900 },
-      reference: { url: '', preset: 'mobile', width: 390, height: 844 }
+      result: { url: '', preset: 'desktop', width: 1440, height: 900, displayMode: 'fit', qcProfileHint: '', providerEvidence: null, inspection: null },
+      reference: { url: '', preset: 'mobile', width: 390, height: 844, displayMode: 'fit', qcProfileHint: '', providerEvidence: null, inspection: null }
     },
-    qcProfile: 'design', evaluations: {}, job: blankJob(), candidates: blankCandidates(), selectedCandidate: null,
+    qcTargetPanelId: 'result', reviewContext: null, qcProfile: 'design', evaluations: {}, job: blankJob(), candidates: blankCandidates(), selectedCandidate: null,
     qcJson: '', capture: null
   }
 }
 
-test('restores a fully-populated v0.2.1 v2 snapshot without any silent migration', () => {
+test('migrates a fully-populated v2 snapshot to connected v5 target evidence', () => {
   const snapshot = {
     schemaVersion: 2,
     browserSplit: true,
     browserPanels: {
-      result: { url: 'https://www.midjourney.com/imagine', preset: 'desktop', width: 1440, height: 900 },
-      reference: { url: 'file:///tmp/reference.png', preset: 'custom', width: 512, height: 512 }
+      result: { url: 'https://www.midjourney.com/imagine', preset: 'desktop', width: 1440, height: 900, displayMode: 'actual' },
+      reference: { url: 'file:///tmp/reference.png', preset: 'custom', width: 512, height: 512, displayMode: 'fit' }
     },
     qcProfile: 'midjourney',
     evaluations: {
@@ -173,9 +181,145 @@ test('restores a fully-populated v0.2.1 v2 snapshot without any silent migration
     qcJson: '{"schemaVersion":1}',
     capture: { panelId: 'result', width: 1440, height: 900, createdAt: NOW, path: '/tmp/capture.png' }
   }
-  const restored = migratePersistedState(structuredClone(snapshot), v2Defaults())
-  assert.deepEqual(restored, snapshot)
-  assert.equal(restored.schemaVersion, 2)
+  const restored = migratePersistedState(structuredClone(snapshot), v5Defaults())
+  assert.equal(restored.schemaVersion, PERSISTED_SCHEMA_VERSION)
+  assert.equal(restored.qcTargetPanelId, 'result')
+  assert.equal(restored.capture.url, '')
+  assert.deepEqual(restored.browserPanels, {
+    result: { ...snapshot.browserPanels.result, qcProfileHint: '', providerEvidence: null, inspection: null },
+    reference: { ...snapshot.browserPanels.reference, qcProfileHint: '', providerEvidence: null, inspection: null }
+  })
+  assert.deepEqual(restored.candidates, snapshot.candidates)
+})
+
+test('restores valid actual display mode and repairs malformed values to fit', () => {
+  const restored = migratePersistedState({
+    browserPanels: {
+      result: { displayMode: 'actual' },
+      reference: { displayMode: 'zoomed' }
+    }
+  }, v5Defaults())
+
+  assert.equal(restored.browserPanels.result.displayMode, 'actual')
+  assert.equal(restored.browserPanels.reference.displayMode, 'fit')
+  assert.equal(
+    migratePersistedState({ browserPanels: { result: { displayMode: 100 } } }, v5Defaults()).browserPanels.result.displayMode,
+    'fit'
+  )
+})
+
+test('restores only durable target evidence and preserves provider provenance', () => {
+  const saved = {
+    qcTargetPanelId: 'reference',
+    browserPanels: { reference: {
+      qcProfileHint: 'higgsfield-image',
+      providerEvidence: {
+        source: 'higgsfield-mcp', jobId: 'job-1', status: 'completed', model: 'seedream_v5_pro',
+        mediaType: 'image', resultUrl: 'https://example.test/reference', width: 768, height: 1024
+      },
+      inspection: { url: 'https://example.test/reference', summary: 'CDP CSS 768×1024', checkedAt: NOW }
+    } },
+    capture: {
+      panelId: 'reference',
+      url: 'https://example.test/reference',
+      width: 768,
+      height: 1024,
+      createdAt: 1_752_710_400_000,
+      path: '/tmp/reference-capture.png'
+    }
+  }
+  const restored = migratePersistedState(saved, v5Defaults())
+  assert.equal(restored.qcTargetPanelId, 'reference')
+  assert.equal(restored.browserPanels.reference.qcProfileHint, 'higgsfield-image')
+  assert.equal(restored.browserPanels.reference.providerEvidence.jobId, 'job-1')
+  assert.equal(restored.browserPanels.reference.inspection.summary, 'CDP CSS 768×1024')
+  assert.deepEqual(restored.capture, saved.capture)
+  assert.equal(migratePersistedState({ capture: { ...saved.capture, path: '' } }, v5Defaults()).capture, null)
+  assert.equal(migratePersistedState({ qcTargetPanelId: 'bogus' }, v5Defaults()).qcTargetPanelId, 'result')
+})
+
+test('routes Midjourney URLs and tool provenance to the matching QC profile', () => {
+  assert.equal(qcProfileFor({ src: 'https://www.midjourney.com/explore?tab=top_month' }), 'midjourney')
+  assert.equal(qcProfileFor({ src: 'https://cdn.example.test/grid.png', toolName: 'midjourney_web_create' }), 'midjourney')
+  assert.equal(qcProfileFor({ src: 'https://cdn.example.test/clip.mp4' }), 'higgsfield-video')
+  assert.equal(qcProfileFor({ src: 'https://example.test/page' }), 'design')
+})
+
+test('extracts bounded Higgsfield MCP metadata for the exact displayed result', () => {
+  const src = 'https://cdn.example.test/result.png?token=display'
+  const evidence = providerEvidenceFor({
+    src,
+    toolName: 'mcp__higgsfield__show_generations',
+    toolResult: {
+      structuredContent: {
+        items: [{
+          id: 'job-1', type: 'image', status: 'completed', model: 'seedream_v5_pro',
+          params: {
+            aspect_ratio: '3:4', batch_size: 2, height: 1168, medias: [{ role: 'image' }],
+            prompt: 'Product fidelity prompt', resolution: '1k', width: 880
+          },
+          results: { rawUrl: 'https://cdn.example.test/result.png?token=raw' },
+          createdAt: 123
+        }]
+      }
+    }
+  })
+
+  assert.equal(evidence.source, 'higgsfield-mcp')
+  assert.equal(evidence.jobId, 'job-1')
+  assert.equal(evidence.status, 'completed')
+  assert.equal(evidence.model, 'seedream_v5_pro')
+  assert.equal(evidence.mediaType, 'image')
+  assert.equal(evidence.width, 880)
+  assert.equal(evidence.height, 1168)
+  assert.equal(evidence.aspectRatio, '3:4')
+  assert.equal(evidence.count, 2)
+  assert.equal(evidence.referenceCount, 1)
+  assert.equal(evidence.resultUrl, 'https://cdn.example.test/result.png?token=raw')
+  assert.ok(evidence.checkedAt)
+})
+
+test('rejects unrelated or malformed provider metadata and bounds restored values', () => {
+  assert.equal(providerEvidenceFor({ src: 'https://cdn.example.test/result.png', toolName: 'midjourney' }), null)
+  assert.equal(providerEvidenceFor({ src: 'https://cdn.example.test/result.png', toolName: 'mcp__higgsfield__show_generations', toolResult: {} }), null)
+  assert.equal(providerEvidenceFor({
+    src: 'https://cdn.example.test/current.png',
+    toolName: 'mcp__higgsfield__show_generations',
+    toolResult: { structuredContent: { items: [{ id: 'old', results: { rawUrl: 'https://cdn.example.test/old.png' } }] } }
+  }), null)
+  assert.equal(restoredProviderEvidence({ source: 'unknown' }), null)
+  const restored = restoredProviderEvidence({
+    source: 'higgsfield-mcp', count: 999, height: -1, jobId: 'j'.repeat(200), mediaType: 'bogus',
+    prompt: 'p'.repeat(5000), referenceCount: 999, width: 880
+  })
+  assert.equal(restored.count, 20)
+  assert.equal(restored.referenceCount, 20)
+  assert.equal(restored.jobId.length, 128)
+  assert.equal(restored.prompt.length, 4000)
+  assert.equal(restored.mediaType, '')
+  assert.equal(restored.height, 0)
+})
+
+test('binds persisted review state to the exact profile, panel, and target URL', () => {
+  const defaults = v5Defaults()
+  const saved = {
+    ...defaults,
+    browserPanels: {
+      ...defaults.browserPanels,
+      result: { ...defaults.browserPanels.result, url: 'https://example.test/result.png' }
+    },
+    qcProfile: 'higgsfield-image',
+    reviewContext: { profileId: 'higgsfield-image', panelId: 'result', url: 'https://example.test/result.png' }
+  }
+  const restored = migratePersistedState(saved, defaults)
+  assert.equal(reviewContextMatches(restored, 'higgsfield-image'), true)
+  assert.equal(reviewContextMatches({ ...restored, qcTargetPanelId: 'reference' }, 'higgsfield-image'), false)
+  assert.equal(reviewContextMatches({
+    ...restored,
+    browserPanels: { ...restored.browserPanels, result: { ...restored.browserPanels.result, url: 'https://example.test/other.png' } }
+  }, 'higgsfield-image'), false)
+  assert.equal(reviewContextMatches(restored, 'midjourney'), false)
+  assert.equal(migratePersistedState({ reviewContext: { profileId: 'bad', panelId: 'result', url: 'x' } }, defaults).reviewContext, null)
 })
 
 test('rejects a top-level provider field as an unknown field (schema v1 frozen)', () => {
@@ -260,7 +404,7 @@ test('restores higgsfield-image structured review state across restart and repai
       B: { dimensions: { promptFidelity: { score: 999, evidence: 42 } } }
     }
   }
-  const restored = migratePersistedState(saved, v2Defaults())
+  const restored = migratePersistedState(saved, v5Defaults())
 
   assert.equal(restored.qcProfile, 'higgsfield-image')
   for (const key of higgsfield.dimensions) {
@@ -269,5 +413,5 @@ test('restores higgsfield-image structured review state across restart and repai
   assert.equal(restored.candidates.A.disposition, 'REPAIR')
   assert.equal(restored.evaluations['higgsfield-image'].prompt.note, 'off-brief')
   assert.deepEqual(restored.candidates.B.dimensions.promptFidelity, { score: 0, evidence: '' })
-  assert.deepEqual(migratePersistedState(structuredClone(restored), v2Defaults()), restored)
+  assert.deepEqual(migratePersistedState(structuredClone(restored), v5Defaults()), restored)
 })

@@ -248,3 +248,18 @@ Value: unlocks every future provider without UI churn. Risk: lowest of the three
 - No cookie/token/storage/credential access, no DOM hacks into guest pages, no paid Midjourney actions, no publishing.
 - Import strictness vs restore permissiveness remain separate regimes; neither is relaxed to make the other simpler.
 - Any persisted-schema change is explicit, versioned, and covered by old-snapshot restore regressions.
+
+## Frozen slice (leader decision)
+
+**Slice 1 — provider-adapter core extraction, minimal cut (no persisted-schema bump), plus mandatory internal-browser pinning enforcement.**
+
+Scope, binding on Lanes C and D:
+
+1. **Core (Lane C — WORKBENCH_CORE in `plugin.js`, `scripts/qc-core.mjs`, `scripts/lib.mjs`, `tests/qc-core.test.mjs`, `tests/plugin-runtime-core.test.mjs`):** provider descriptor registry with Midjourney as the first adapter; `validateQcDocument` byte-for-byte frozen as the Midjourney adapter's schema-v1 validator; higgsfield-image descriptor proves the seam; provider derived from `qcProfile` (schema v2 unchanged; frozen v0.2.1 v2-snapshot restore regression required); parity test stays green.
+2. **UI (Lane D — `plugin.js` outside the core markers, `README.md`, `skill/SKILL.md`):** `QcPane` routes structured review through the active provider descriptor instead of `=== 'midjourney'`; `CandidateCard` takes dimension labels from the descriptor; `qcProfileFor` resolves via registry; UI states/keyboard flow unchanged by contract for existing profiles.
+3. **Internal-browser pinning enforcement (mandatory, split):**
+   - Lane D: `skill/SKILL.md` gains hard-stop preconditions — before any pointer/type action the workflow MUST verify the target is the Hermes Desktop window's internal Browser pane (`app="Hermes"` scope assertion), and MUST stop with a named `internal_pane_unavailable` state instead of falling back to any external browser (Chrome/Safari/Arc/Brave/Edge) or isolated `browser_*` session; README security boundary updated to match. Browser pane shows a visible automation-target affordance so agents and users can confirm the pinned target.
+   - Lane C: any state the badge needs is exposed via an existing-store accessor, not a new persisted field.
+4. **Acceptance:** audit sections "Recommendation to leader" items 1–7 and Lane B "S1" criteria 1–7 plus cross-slice invariants are all binding. Rendered smoke per criterion 7 with documented limitation if the #65647 host build is not runnable.
+
+Out of scope (explicitly): multi-job queue (S2), review-session UX (S3), any persisted-schema bump, any change to strict schema v1 semantics, renaming/moving the packaged skill.

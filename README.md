@@ -96,6 +96,8 @@ The plugin does not ship a Python backend and does not copy credentials.
 
 It uses the existing `persist:hermes-browser` partition as-is and never reads, exports, deletes, or migrates its cookies. Midjourney submit, upscale, and variation remain agent approval gates: the plugin displays state and QC but never clicks those controls itself.
 
+Midjourney automation is pinned to the Browser pane inside the Hermes Desktop window. The workflow scopes desktop actions to `app="Hermes"` and explicitly forbids external Chrome, Safari, Arc, Brave, Edge, and isolated `browser_*` sessions. If the internal pane is unavailable, it stops instead of falling back to another browser.
+
 ## Non-billable fixture E2E
 
 Create a complete local artifact job without a Midjourney submission:

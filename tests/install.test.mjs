@@ -176,3 +176,12 @@ test('keeps package, manifest, and plugin versions aligned', async () => {
   assert.equal(pluginVersion, packageJson.version)
   assert.equal(skillVersion, packageJson.version)
 })
+
+test('pins Midjourney automation to the Hermes internal Browser pane', () => {
+  assert.match(sourceSkill, /persist:hermes-browser/)
+  assert.match(sourceSkill, /app="Hermes"/)
+  assert.match(sourceSkill, /Never use `browser_navigate`, any `browser_\*` tool/)
+  assert.match(sourceSkill, /Chrome, Safari, Arc, Brave, or Edge/)
+  assert.match(sourceSkill, /internal_browser_unavailable/)
+  assert.match(sourceSkill, /Never fall back to an external browser/)
+})

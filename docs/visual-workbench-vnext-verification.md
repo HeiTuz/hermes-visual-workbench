@@ -1,6 +1,6 @@
 # Visual Workbench vNext — Lane E Verification
 
-Reviewer: worker-5 (Lane E, critic). Baseline: clean `main` @ fef8ee4 (v0.2.1). Reviewed integration: leader head 526afe0 (core registry 02253b7, schema/restore freeze d745f71, descriptor UI routing c7fc49b, pinning docs 526afe0). Frozen slice: S1 provider-adapter core extraction, minimal cut (no persisted-schema bump) + mandatory internal-browser pinning enforcement (`docs/visual-workbench-vnext-audit.md`, "Frozen slice").
+Reviewer: worker-5 (Lane E, critic). Baseline: clean `main` @ fef8ee4 (v0.2.1). Reviewed integration: leader head 526afe0 (core registry 02253b7, schema/restore freeze d745f71, descriptor UI routing c7fc49b, pinning docs 526afe0), then finding-resolution commits ae50b09 (F1–F3) and 3123e62 (F4–F5) — final verified head **3123e62, v0.3.0**. Frozen slice: S1 provider-adapter core extraction, minimal cut (no persisted-schema bump) + mandatory internal-browser pinning enforcement (`docs/visual-workbench-vnext-audit.md`, "Frozen slice").
 
 ## Before/after matrix
 
@@ -44,15 +44,24 @@ Phase-1 script FAILs were selector-heuristic bugs in the probe (wrong `Job ID` l
 - Sandboxed fixture job: `/tmp/hvw-worker5-rendered/home/artifacts/midjourney/worker5-review/`.
 - Element-tree smoke: `/tmp/hvw-worker4-smoke/smoke.mjs` (worker-4's; run independently by Lane E).
 
-## Findings ledger (filed to leader 2026-07-17; resolve-or-rebut required)
+## Findings ledger — ALL RESOLVED
 
-| ID | Severity | Finding | Repro | Owner |
+| ID | Severity | Finding | Repro | Resolution |
 | --- | --- | --- | --- | --- |
-| F1 | HIGH (release blocker) | Five `.gjc/state/sdk/*.json` runtime session files with live ws tokens committed on `main` | `git diff --name-only fef8ee4 526afe0 \| grep .gjc/state` | leader (integration debris); fix: remove + gitignore `.gjc/` |
-| F2 | MEDIUM (release blocker) | No version bump for a feature slice — package/manifest/plugin/SKILL all 0.2.1; leader release plan requires explicit bump | `node -e 'console.log(require("./package.json").version)'` | leader/C |
-| F3 | MEDIUM | `tests/install.test.mjs:180-187` pinning test asserts superseded `internal_browser_unavailable`, passing only via SKILL.md rename note; doesn't assert canonical state/precondition/affordance | read test vs `skill/SKILL.md:25` | leader routes (file outside C/D ownership) |
-| F4 | LOW-MED | Shared A–D candidate store across structured providers undocumented — profile switch relabels the same review data (observed live) | import midjourney fixture → switch profile to Higgsfield Image | D (README sentence) |
-| F5 | LOW (rebuttable) | `JobEditor` hard-codes `Midjourney job ID`/`Midjourney job brief` aria-labels though gated on `provider.qcDocument` | `plugin.js:979,986` | D |
+| F1 | HIGH (release blocker) | Five `.gjc/state/sdk/*.json` runtime session files with live ws tokens committed on `main` | `git diff --name-only fef8ee4 526afe0 \| grep .gjc/state` | **RESOLVED @ ae50b09** — files purged from tracking, `.gjc/` gitignored; re-verified: `git ls-files '.gjc*'` = 0 |
+| F2 | MEDIUM (release blocker) | No version bump for a feature slice — package/manifest/plugin/SKILL all 0.2.1 | `node -e 'console.log(require("./package.json").version)'` | **RESOLVED @ ae50b09** — 0.3.0 across package.json, manifest.json, `PLUGIN_VERSION`, SKILL.md frontmatter; alignment test green |
+| F3 | MEDIUM | `tests/install.test.mjs` pinning test asserted superseded `internal_browser_unavailable`, passing only via SKILL.md rename note | read test vs `skill/SKILL.md:25` | **RESOLVED @ ae50b09** — test asserts canonical `internal_pane_unavailable` and `doesNotMatch` the superseded name; SKILL.md rename note removed |
+| F4 | LOW-MED | Shared A–D candidate store across structured providers undocumented — profile switch relabels the same review data (observed live) | import midjourney fixture → switch profile to Higgsfield Image | **RESOLVED @ 3123e62** — README feature list now documents the single shared store after the provider-registry bullet |
+| F5 | LOW | `JobEditor` hard-coded `Midjourney job ID`/`Midjourney job brief` aria-labels though gated on `provider.qcDocument` | `plugin.js` (pre-fix :979,986) | **RESOLVED @ 3123e62** — labels derived from descriptor (`provider.label.replace(/ QC$/,'')`); verified byte-identical to v0.2.1 for Midjourney (`Midjourney job ID` / `Midjourney job brief` / `does not trigger Midjourney actions`) |
+
+### Post-fix re-verification (at 3123e62)
+
+```
+npm test                              # 30/30 PASS, node --check clean
+node /tmp/hvw-worker4-smoke/smoke.mjs # SMOKE PASSED: 8/8 (plugin.js copy = 3123e62 working tree)
+git ls-files '.gjc*' | wc -l          # 0
+node -e '...versions...'              # pkg 0.3.0, manifest 0.3.0, plugin 0.3.0, skill 0.3.0
+```
 
 ## Limitations
 
@@ -62,5 +71,6 @@ Phase-1 script FAILs were selector-heuristic bugs in the probe (wrong `Job ID` l
 
 ## Rollback instructions
 
-- Full slice rollback: `git revert 526afe0 c7fc49b d745f71 02253b7` on main (docs+UI+tests+core, in that order), or hard-reset the release branch to fef8ee4 (v0.2.1) — no persisted-schema change shipped, so any client that ran the new build restores cleanly on v0.2.1 (`workbench.v2` shape unchanged; verified by the frozen-snapshot test both ways).
-- No installer/manifest changes shipped; no action needed in any installed Hermes home.
+- Full slice rollback: `git revert 3123e62 ae50b09 526afe0 c7fc49b d745f71 02253b7` on main (finding-fixes+docs+UI+tests+core, newest first), or hard-reset the release branch to fef8ee4 (v0.2.1) — no persisted-schema change shipped, so any client that ran the new build restores cleanly on v0.2.1 (`workbench.v2` shape unchanged; verified by the frozen-snapshot test both ways).
+- Version-only rollback is not meaningful: reverting ae50b09 alone would restore both the 0.2.1 version and the leaked `.gjc` state files — always revert the full stack or nothing.
+- No installer/manifest layout changes shipped; no action needed in any installed Hermes home.

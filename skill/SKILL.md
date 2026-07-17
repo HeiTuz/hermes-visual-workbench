@@ -22,8 +22,8 @@ Use this skill when the user asks to prepare or run a Midjourney job, compare a 
 - Default to `DRAFT → READY` and stop before submit.
 - Browser authority is the Browser pane rendered inside the Hermes Desktop window, backed by `persist:hermes-browser`. Scope every GUI capture and action to `computer_use(..., app="Hermes")` and confirm the target window belongs to Hermes before interacting.
 - Never use `browser_navigate`, any `browser_*` tool, or an external browser application such as Chrome, Safari, Arc, Brave, or Edge for this workflow. Those are different browser sessions and do not carry the Hermes internal Browser pane state.
-- If the Hermes internal Browser pane cannot be found, opened, captured, or controlled, stop as `internal_browser_unavailable`. Never fall back to an external browser.
-- Pinned-target precondition (hard stop): immediately before every pointer, focus, or type action, re-verify from a fresh `app="Hermes"` capture that the action target is the internal Browser pane inside the Hermes Desktop window and that the pane's visible **Automation target** affordance reads `Hermes internal Browser pane · persist:hermes-browser`. If the affordance reads `Automation target unavailable`, or the pane cannot be re-verified, stop as `internal_browser_unavailable`. Never retarget an external browser (Chrome, Safari, Arc, Brave, Edge) or an isolated `browser_*` session.
+- If the Hermes internal Browser pane cannot be found, opened, captured, or controlled, stop as `internal_pane_unavailable` (renamed from `internal_browser_unavailable` in v0.2.x; the provider registry's automation descriptor is the canonical source of this state name). Never fall back to an external browser.
+- Pinned-target precondition (hard stop): immediately before every pointer, focus, or type action, re-verify from a fresh `app="Hermes"` capture that the action target is the internal Browser pane inside the Hermes Desktop window and that the pane's visible **Automation target** affordance reads `Hermes internal Browser pane · persist:hermes-browser`. If the affordance reads `Automation target unavailable`, or the pane cannot be re-verified, stop as `internal_pane_unavailable`. Never retarget an external browser (Chrome, Safari, Arc, Brave, Edge) or an isolated `browser_*` session.
 - Use real pointer/focus/type events inside the Hermes window. Do not execute arbitrary page JavaScript and do not mutate DOM state directly.
 - Bound every wait and retry. Never duplicate a submission after an uncertain click.
 
@@ -36,7 +36,7 @@ Any nonterminal state may terminate as `FAILED` or `CANCELLED`. Do not skip live
 ## Workflow
 
 1. Normalize the brief. Create a filesystem-safe job ID and write `request.json` plus `provenance.json` with timestamps, source, approval status, and no secrets.
-2. Capture `app="Hermes"`, locate the Hermes titlebar **Browser** control, and open the Browser pane inside that same Hermes window. Confirm the pane's **Automation target** affordance shows `Hermes internal Browser pane · persist:hermes-browser` before any interaction. Navigate only through the pane's own address field. Verify the visible URL is `midjourney.com` and the rendered page looks authenticated. If the pane is unavailable or the affordance reads `Automation target unavailable`, stop as `internal_browser_unavailable`; if a login screen appears, stop as `login_required`. Do not open Chrome or another external browser and do not handle credentials.
+2. Capture `app="Hermes"`, locate the Hermes titlebar **Browser** control, and open the Browser pane inside that same Hermes window. Confirm the pane's **Automation target** affordance shows `Hermes internal Browser pane · persist:hermes-browser` before any interaction. Navigate only through the pane's own address field. Verify the visible URL is `midjourney.com` and the rendered page looks authenticated. If the pane is unavailable or the affordance reads `Automation target unavailable`, stop as `internal_pane_unavailable`; if a login screen appears, stop as `login_required`. Do not open Chrome or another external browser and do not handle credentials.
 3. Prepare the exact prompt and set the job to `READY`. Show the user what would be submitted.
 4. Before the first submit click, re-read the current user turn. Without explicit approval, stop at `READY` and report that no credits were spent.
 5. With approval, keep every background pointer/focus/type action scoped to `app="Hermes"` and the internal Browser pane. After the submit event, write a duplicate-prevention marker before any retry. If acknowledgement is uncertain, stop and inspect; never click submit again blindly.
@@ -69,6 +69,6 @@ Use an existing feed screenshot or the package fixture. A valid dry run is: crea
 
 - Login missing: stop and ask the user to authenticate manually in the persistent Browser pane.
 - Import rejected: preserve the pane's prior state, fix only the reported schema violation, and import once more.
-- Internal Browser pane unavailable: stop as `internal_browser_unavailable`; do not launch or reuse an external browser.
+- Internal Browser pane unavailable: stop as `internal_pane_unavailable`; do not launch or reuse an external browser.
 - Capture unavailable: use a background screenshot scoped to `app="Hermes"`; do not access browser storage.
 - Uncertain submit/upscale click: stop. Inspect rendered UI before any retry.

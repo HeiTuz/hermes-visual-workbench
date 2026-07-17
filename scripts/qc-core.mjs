@@ -281,3 +281,96 @@ export function migratePersistedState(saved, defaults) {
     capture: restoredCapture(source.capture)
   }
 }
+
+// Provider descriptor registry. Midjourney is the first adapter: its QC wire
+// format is the frozen schema-v1 document contract (`validateQcDocument`).
+// Descriptor dimensions MUST be drawn from the persisted schema-v2 candidate
+// dimension vocabulary (`QC_DIMENSIONS`) so structured review state stays
+// storable without a persisted-schema bump; `assertProviderRegistry` enforces
+// this at module init.
+export const PROVIDERS = Object.freeze({
+  midjourney: Object.freeze({
+    id: 'midjourney',
+    label: 'Midjourney QC',
+    profileId: 'midjourney',
+    candidateIds: CANDIDATE_IDS,
+    structuredReview: true,
+    dimensions: QC_DIMENSIONS,
+    dimensionLabels: Object.freeze({
+      promptFidelity: 'Prompt fidelity',
+      composition: 'Composition',
+      identityReferenceFidelity: 'Identity / reference fidelity',
+      anatomyGeometry: 'Anatomy & geometry',
+      artifacts: 'Artifacts',
+      typography: 'Typography',
+      colorMaterialFidelity: 'Color & material fidelity',
+      productionReadiness: 'Production readiness'
+    }),
+    chatImageToolNames: Object.freeze(['midjourney']),
+    qcDocument: Object.freeze({
+      schemaVersion: QC_DOCUMENT_SCHEMA_VERSION,
+      maxBytes: MAX_QC_JSON_BYTES,
+      validate: validateQcDocument
+    }),
+    automation: Object.freeze({
+      target: 'hermes-internal-browser-pane',
+      appScope: 'Hermes',
+      partition: 'persist:hermes-browser',
+      externalBrowserFallback: 'forbidden',
+      unavailableState: 'internal_pane_unavailable'
+    })
+  }),
+  'higgsfield-image': Object.freeze({
+    id: 'higgsfield-image',
+    label: 'Higgsfield Image QC',
+    profileId: 'higgsfield-image',
+    candidateIds: CANDIDATE_IDS,
+    structuredReview: true,
+    dimensions: Object.freeze([
+      'promptFidelity',
+      'identityReferenceFidelity',
+      'anatomyGeometry',
+      'artifacts',
+      'colorMaterialFidelity',
+      'typography',
+      'composition'
+    ]),
+    dimensionLabels: Object.freeze({
+      promptFidelity: 'Prompt adherence',
+      identityReferenceFidelity: 'Subject / product identity',
+      anatomyGeometry: 'Anatomy & geometry',
+      artifacts: 'Artifacts & cleanup',
+      colorMaterialFidelity: 'Color grade & critical colors',
+      typography: 'Text, logo & labels',
+      composition: 'Framing & crop'
+    }),
+    chatImageToolNames: Object.freeze(['higgsfield']),
+    qcDocument: null,
+    automation: null
+  })
+})
+
+export const PROVIDER_IDS = Object.freeze(Object.keys(PROVIDERS))
+
+function assertProviderRegistry() {
+  for (const providerId of PROVIDER_IDS) {
+    const provider = PROVIDERS[providerId]
+    if (provider.id !== providerId) throw new Error(`Provider ${providerId}: id must match its registry key`)
+    if (!QC_PROFILE_IDS.includes(provider.profileId)) throw new Error(`Provider ${providerId}: profileId must be a known QC profile`)
+    if (provider.candidateIds !== CANDIDATE_IDS) throw new Error(`Provider ${providerId}: candidateIds must reuse the shared candidate vocabulary`)
+    for (const key of provider.dimensions) {
+      if (!QC_DIMENSIONS.includes(key)) throw new Error(`Provider ${providerId}: dimension ${key} is not storable in persisted schema v2`)
+      if (typeof provider.dimensionLabels[key] !== 'string' || !provider.dimensionLabels[key]) {
+        throw new Error(`Provider ${providerId}: dimension ${key} must have a label`)
+      }
+    }
+  }
+}
+assertProviderRegistry()
+
+export function providerForProfile(profileId) {
+  for (const providerId of PROVIDER_IDS) {
+    if (PROVIDERS[providerId].profileId === profileId) return PROVIDERS[providerId]
+  }
+  return null
+}

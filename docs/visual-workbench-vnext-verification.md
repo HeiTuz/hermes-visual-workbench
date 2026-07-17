@@ -33,7 +33,7 @@ $ npm run fixture:e2e         # ok:true, artifacts under ~/.hermes/artifacts/mid
 
 ## Limitations
 
-- Rendered Hermes Desktop smoke not yet attempted; will use PR #65647 checkout under `/tmp` if runnable, otherwise document the exact limitation.
+- Rendered smoke path assessed 2026-07-17 (pre-implementation): `/Applications/Hermes.app` is present; CDP port 9225 not currently listening (prior sessions attached via `--remote-debugging-port=9225`, see `/tmp/hermes-installed-cdp.json`). PR #65647 checkout exists at `/tmp/hermes-pr-65647-privacy/head` but `apps/desktop` has no `node_modules` (full Electron dev build would be required). Planned post-C/D smoke: safe test install via `scripts/install.mjs --target/--skill-target` into a temp `HERMES_HOME`, launch installed Hermes.app with that `HERMES_HOME` and a remote-debugging port, CDP screenshots at desktop (1440×900) and narrow (390×844) widths. Never touches real `~/.hermes` plugin/skill dirs.
 
 ## Rollback instructions
 

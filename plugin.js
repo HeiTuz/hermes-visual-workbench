@@ -954,7 +954,8 @@ function dispositionVariant(disposition) {
   return 'warn'
 }
 
-function JobEditor({ workbench }) {
+function JobEditor({ provider, workbench }) {
+  const providerName = provider.label.replace(/ QC$/, '')
   const updateJob = patch => {
     const now = new Date().toISOString()
     setState({ job: { ...workbench.job, ...patch, createdAt: workbench.job.createdAt || now, updatedAt: now } })
@@ -972,18 +973,18 @@ function JobEditor({ workbench }) {
         style: { alignItems: 'center', display: 'flex', gap: 6 },
         children: [
           jsx(Badge, { variant: ['FAILED', 'CANCELLED'].includes(workbench.job.state) ? 'destructive' : 'muted', children: workbench.job.state }),
-          jsx('span', { style: { color: 'var(--ui-text-quaternary)', fontSize: 10 }, children: 'Status only · does not trigger Midjourney actions' })
+          jsx('span', { style: { color: 'var(--ui-text-quaternary)', fontSize: 10 }, children: `Status only · does not trigger ${providerName} actions` })
         ]
       }),
       jsx(Input, {
-        'aria-label': 'Midjourney job ID',
+        'aria-label': `${providerName} job ID`,
         onChange: event => updateJob({ id: event.target.value }),
         placeholder: 'job-id',
         style: { marginTop: 8 },
         value: workbench.job.id
       }),
       jsx(Textarea, {
-        'aria-label': 'Midjourney job brief',
+        'aria-label': `${providerName} job brief`,
         onChange: event => updateJob({ brief: event.target.value }),
         placeholder: 'Normalized image brief',
         style: { marginTop: 8, minHeight: 56 },
@@ -1157,7 +1158,7 @@ function StructuredReviewPane({ provider, workbench }) {
         style: { flex: 1, minHeight: 0 },
         children: jsxs('div', {
           children: [
-            wire ? jsx(JobEditor, { workbench }) : null,
+            wire ? jsx(JobEditor, { provider, workbench }) : null,
             wire ? jsx(Separator, {}) : null,
             wire
               ? jsxs('div', {

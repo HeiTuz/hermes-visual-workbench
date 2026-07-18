@@ -55,6 +55,9 @@ export function skillDirectory(options, env = process.env) {
   if (options.skillTarget) return resolve(options.skillTarget)
   return join(hermesHomeDirectory(options, env), 'skills', SKILL_NAME)
 }
+export function dashboardDirectory(options, env = process.env) {
+  return join(hermesHomeDirectory(options, env), 'plugins', 'visual-workbench', 'dashboard')
+}
 
 export function sha256(value) {
   return createHash('sha256').update(value).digest('hex')

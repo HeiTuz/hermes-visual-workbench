@@ -1,0 +1,7 @@
+{
+  "name": "visual-workbench",
+  "api": "plugin_api.py",
+  "tab": {
+    "hidden": true
+  }
+}

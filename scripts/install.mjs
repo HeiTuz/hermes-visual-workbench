@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   atomicWrite,
   backupFile,
+  dashboardDirectory,
   MARKER_NAME,
   PACKAGE_ROOT,
   parseArgs,
@@ -51,10 +52,12 @@ async function readManagedFile(path) {
   }
 }
 
-function expectedManagedFiles(target, skillTarget) {
+function expectedManagedFiles(target, skillTarget, dashboardTarget) {
   return [
     { id: 'plugin', path: join(target, 'plugin.js') },
-    { id: 'skill', path: join(skillTarget, 'SKILL.md') }
+    { id: 'skill', path: join(skillTarget, 'SKILL.md') },
+    { id: 'dashboard-manifest', path: join(dashboardTarget, 'manifest.json') },
+    { id: 'dashboard-api', path: join(dashboardTarget, 'plugin_api.py') }
   ]
 }
 
@@ -77,13 +80,11 @@ function validatedMarkerFiles(marker, expected) {
   })
 }
 
-async function uninstall(target, skillTarget, options) {
-  const pluginPath = join(target, 'plugin.js')
+async function uninstall(target, skillTarget, dashboardTarget, options) {
   const markerPath = join(target, MARKER_NAME)
-  const expected = expectedManagedFiles(target, skillTarget)
-  const skillPath = expected[1].path
+  const expected = expectedManagedFiles(target, skillTarget, dashboardTarget)
 
-  if (!(await exists(pluginPath)) && !(await exists(skillPath)) && !(await exists(markerPath))) {
+  if (!(await Promise.all([...expected.map(file => exists(file.path)), exists(markerPath)])).some(Boolean)) {
     console.log(`Visual Workbench is not installed at ${target}`)
     return
   }
@@ -122,15 +123,21 @@ async function uninstall(target, skillTarget, options) {
   console.log(`Removed Visual Workbench from ${target}`)
 }
 
-async function install(target, skillTarget) {
+async function install(target, skillTarget, dashboardTarget) {
   const packageJson = await readJson(join(PACKAGE_ROOT, 'package.json'))
   const markerPath = join(target, MARKER_NAME)
-  const managed = expectedManagedFiles(target, skillTarget).map(file => ({
+  const sourcePaths = {
+    plugin: join(PACKAGE_ROOT, 'plugin.js'),
+    skill: join(PACKAGE_ROOT, 'skill', 'SKILL.md'),
+    'dashboard-manifest': join(PACKAGE_ROOT, 'dashboard', 'manifest.json'),
+    'dashboard-api': join(PACKAGE_ROOT, 'dashboard', 'plugin_api.py')
+  }
+  const managed = expectedManagedFiles(target, skillTarget, dashboardTarget).map(file => ({
     ...file,
-    sourcePath: file.id === 'plugin' ? join(PACKAGE_ROOT, 'plugin.js') : join(PACKAGE_ROOT, 'skill', 'SKILL.md')
+    sourcePath: sourcePaths[file.id]
   }))
 
-  await Promise.all([mkdir(target, { recursive: true }), mkdir(skillTarget, { recursive: true })])
+  await Promise.all([mkdir(target, { recursive: true }), mkdir(skillTarget, { recursive: true }), mkdir(dashboardTarget, { recursive: true })])
   const markerBefore = await readManagedFile(markerPath)
   const plans = []
   for (const file of managed) {
@@ -187,6 +194,7 @@ async function install(target, skillTarget) {
   }
   console.log(`${changed ? 'Installed' : 'Verified'} Visual Workbench ${packageJson.version} at ${target}`)
   console.log(`Installed Midjourney workflow skill to ${skillTarget}`)
+  console.log('Run: hermes plugins enable visual-workbench (backend restart required)')
 }
 
 try {
@@ -196,8 +204,9 @@ try {
   } else {
     const target = targetDirectory(options)
     const skillTarget = skillDirectory(options)
-    if (options.uninstall) await uninstall(target, skillTarget, options)
-    else await install(target, skillTarget)
+    const dashboardTarget = dashboardDirectory(options)
+    if (options.uninstall) await uninstall(target, skillTarget, dashboardTarget, options)
+    else await install(target, skillTarget, dashboardTarget)
   }
 } catch (error) {
   console.error(`hermes-visual-workbench: ${error instanceof Error ? error.message : String(error)}`)

@@ -16,10 +16,18 @@ import {
   providerForProfile,
   QC_DIMENSIONS,
   qcDocumentFromState,
+  panelLinkedToQc,
   qcProfileFor,
   reviewContextMatches,
   restoredProviderEvidence,
   transitionJob,
+  linkPanelState,
+  markPanelLoadFailedState,
+  swapPanelsState,
+  updatePanelState,
+  validateAgentCommand,
+  applyAgentCommand,
+  agentStatusSnapshot,
   validateQcDocument
 } from '../scripts/qc-core.mjs'
 
@@ -146,21 +154,21 @@ function v5Defaults() {
     schemaVersion: PERSISTED_SCHEMA_VERSION,
     browserSplit: false,
     browserPanels: {
-      result: { url: '', preset: 'desktop', width: 1440, height: 900, displayMode: 'fit', qcProfileHint: '', providerEvidence: null, inspection: null },
-      reference: { url: '', preset: 'mobile', width: 390, height: 844, displayMode: 'fit', qcProfileHint: '', providerEvidence: null, inspection: null }
+      result: { url: '', targetId: 'tfixture-result', preset: 'desktop', width: 1440, height: 900, displayMode: 'fit', qcProfileHint: '', providerEvidence: null, inspection: null },
+      reference: { url: '', targetId: 'tfixture-reference', preset: 'mobile', width: 390, height: 844, displayMode: 'fit', qcProfileHint: '', providerEvidence: null, inspection: null }
     },
     qcTargetPanelId: 'result', reviewContext: null, qcProfile: 'design', evaluations: {}, job: blankJob(), candidates: blankCandidates(), selectedCandidate: null,
     qcJson: '', capture: null
   }
 }
 
-test('migrates a fully-populated v2 snapshot to connected v5 target evidence', () => {
+test('migrates a fully-populated v2 snapshot and drops URL-less capture evidence', () => {
   const snapshot = {
     schemaVersion: 2,
     browserSplit: true,
     browserPanels: {
-      result: { url: 'https://www.midjourney.com/imagine', preset: 'desktop', width: 1440, height: 900, displayMode: 'actual' },
-      reference: { url: 'file:///tmp/reference.png', preset: 'custom', width: 512, height: 512, displayMode: 'fit' }
+      result: { url: 'https://www.midjourney.com/imagine', targetId: 'tv2-result', preset: 'desktop', width: 1440, height: 900, displayMode: 'actual' },
+      reference: { url: 'file:///tmp/reference.png', targetId: 'tv2-reference', preset: 'custom', width: 512, height: 512, displayMode: 'fit' }
     },
     qcProfile: 'midjourney',
     evaluations: {
@@ -179,12 +187,12 @@ test('migrates a fully-populated v2 snapshot to connected v5 target evidence', (
     }])),
     selectedCandidate: 'A',
     qcJson: '{"schemaVersion":1}',
-    capture: { panelId: 'result', width: 1440, height: 900, createdAt: NOW, path: '/tmp/capture.png' }
+    capture: { panelId: 'result', targetId: 'tv2-result', width: 1440, height: 900, createdAt: NOW, path: '/tmp/capture.png' }
   }
   const restored = migratePersistedState(structuredClone(snapshot), v5Defaults())
   assert.equal(restored.schemaVersion, PERSISTED_SCHEMA_VERSION)
   assert.equal(restored.qcTargetPanelId, 'result')
-  assert.equal(restored.capture.url, '')
+  assert.equal(restored.capture, null)
   assert.deepEqual(restored.browserPanels, {
     result: { ...snapshot.browserPanels.result, qcProfileHint: '', providerEvidence: null, inspection: null },
     reference: { ...snapshot.browserPanels.reference, qcProfileHint: '', providerEvidence: null, inspection: null }
@@ -212,7 +220,7 @@ test('restores only durable target evidence and preserves provider provenance', 
   const saved = {
     qcTargetPanelId: 'reference',
     browserPanels: { reference: {
-      qcProfileHint: 'higgsfield-image',
+      url: 'https://example.test/reference', targetId: 'tsaved-reference', qcProfileHint: 'higgsfield-image',
       providerEvidence: {
         source: 'higgsfield-mcp', jobId: 'job-1', status: 'completed', model: 'seedream_v5_pro',
         mediaType: 'image', resultUrl: 'https://example.test/reference', width: 768, height: 1024
@@ -220,7 +228,7 @@ test('restores only durable target evidence and preserves provider provenance', 
       inspection: { url: 'https://example.test/reference', summary: 'CDP CSS 768×1024', checkedAt: NOW }
     } },
     capture: {
-      panelId: 'reference',
+      panelId: 'reference', targetId: 'tsaved-reference',
       url: 'https://example.test/reference',
       width: 768,
       height: 1024,
@@ -279,6 +287,23 @@ test('extracts bounded Higgsfield MCP metadata for the exact displayed result', 
   assert.ok(evidence.checkedAt)
 })
 
+test('extracts Soul V2 metadata from the Higgsfield job_status raw_data envelope', () => {
+  const src = 'https://cdn.example.test/soul.png'
+  const evidence = providerEvidenceFor({
+    src,
+    toolName: 'mcp__higgsfield__job_status',
+    toolResult: { structuredContent: { raw_data: {
+      id: 'job-soul', job_set_type: 'text2image_soul_v2', result_url: src, status: 'completed',
+      params: { custom_reference_id: 'soul-1', height: 2048, prompt: 'Portrait', width: 1536 }
+    } } }
+  })
+
+  assert.equal(evidence.jobId, 'job-soul')
+  assert.equal(evidence.model, 'text2image_soul_v2')
+  assert.equal(evidence.soulId, 'soul-1')
+  assert.equal(evidence.resultUrl, src)
+})
+
 test('rejects unrelated or malformed provider metadata and bounds restored values', () => {
   assert.equal(providerEvidenceFor({ src: 'https://cdn.example.test/result.png', toolName: 'midjourney' }), null)
   assert.equal(providerEvidenceFor({ src: 'https://cdn.example.test/result.png', toolName: 'mcp__higgsfield__show_generations', toolResult: {} }), null)
@@ -300,10 +325,11 @@ test('rejects unrelated or malformed provider metadata and bounds restored value
   assert.equal(restored.height, 0)
 })
 
-test('binds persisted review state to the exact profile, panel, and target URL', () => {
+test('binds persisted review state to the exact profile, panel, and target identity', () => {
   const defaults = v5Defaults()
   const saved = {
     ...defaults,
+    schemaVersion: 5,
     browserPanels: {
       ...defaults.browserPanels,
       result: { ...defaults.browserPanels.result, url: 'https://example.test/result.png' }
@@ -316,7 +342,7 @@ test('binds persisted review state to the exact profile, panel, and target URL',
   assert.equal(reviewContextMatches({ ...restored, qcTargetPanelId: 'reference' }, 'higgsfield-image'), false)
   assert.equal(reviewContextMatches({
     ...restored,
-    browserPanels: { ...restored.browserPanels, result: { ...restored.browserPanels.result, url: 'https://example.test/other.png' } }
+    browserPanels: { ...restored.browserPanels, result: { ...restored.browserPanels.result, targetId: 'tother-target' } }
   }, 'higgsfield-image'), false)
   assert.equal(reviewContextMatches(restored, 'midjourney'), false)
   assert.equal(migratePersistedState({ reviewContext: { profileId: 'bad', panelId: 'result', url: 'x' } }, defaults).reviewContext, null)
@@ -414,4 +440,298 @@ test('restores higgsfield-image structured review state across restart and repai
   assert.equal(restored.evaluations['higgsfield-image'].prompt.note, 'off-brief')
   assert.deepEqual(restored.candidates.B.dimensions.promptFidelity, { score: 0, evidence: '' })
   assert.deepEqual(migratePersistedState(structuredClone(restored), v5Defaults()), restored)
+})
+test('enforces v6 review identities and migrates matching v5 evidence', () => {
+  const defaults = v5Defaults()
+  const saved = {
+    schemaVersion: 5,
+    qcTargetPanelId: 'result',
+    qcProfile: 'design',
+    browserPanels: {
+      result: { ...defaults.browserPanels.result, url: 'https://example.test/page' },
+      reference: defaults.browserPanels.reference
+    },
+    reviewContext: { profileId: 'design', panelId: 'result', url: 'https://example.test/page' },
+    capture: { panelId: 'result', url: 'https://example.test/page', width: 800, height: 600, createdAt: NOW, path: '/tmp/page.png' }
+  }
+  const restored = migratePersistedState(saved, defaults)
+  assert.equal(reviewContextMatches(restored, 'design'), true)
+  assert.equal(panelLinkedToQc(restored, 'result'), true)
+  assert.equal(restored.capture.targetId, restored.browserPanels.result.targetId)
+  assert.equal(reviewContextMatches({ ...restored, reviewContext: { ...restored.reviewContext, stale: true } }, 'design'), false)
+  assert.equal(panelLinkedToQc({
+    ...restored,
+    browserPanels: { ...restored.browserPanels, result: { ...restored.browserPanels.result, targetId: 'tnew-target' } }
+  }, 'result'), false)
+
+  const dropped = migratePersistedState({
+    ...saved,
+    reviewContext: { ...saved.reviewContext, url: 'https://example.test/other' },
+    evaluations: { design: { composition: { status: 'pass', note: 'orphan' } } }
+  }, defaults)
+  assert.equal(dropped.reviewContext, null)
+  assert.deepEqual(dropped.evaluations, {})
+})
+
+function sequentialIds() {
+  let counter = 0
+  return prefix => `${prefix}gen${String(++counter).padStart(2, '0')}-abcd`
+}
+
+function v6State() {
+  const defaults = v5Defaults()
+  return {
+    ...defaults,
+    browserPanels: {
+      result: { ...defaults.browserPanels.result, url: 'https://example.test/page', targetId: 'tresult-0001' },
+      reference: { ...defaults.browserPanels.reference, url: 'https://cdn.example.test/shot.png', targetId: 'treference-0001' }
+    }
+  }
+}
+
+function resultCapture() {
+  return { panelId: 'result', targetId: 'tresult-0001', url: 'https://example.test/page', width: 800, height: 600, createdAt: NOW, path: '/tmp/x.png' }
+}
+
+test('link creates one atomic review context and resets review families', () => {
+  const makeId = sequentialIds()
+  const base = { ...v6State(), capture: resultCapture(), evaluations: { design: { composition: { status: 'pass', note: 'old' } } } }
+  const linked = linkPanelState(base, 'result', { profileId: 'design', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  assert.deepEqual(linked.reviewContext, {
+    contextId: 'clink-0001', panelId: 'result', targetId: 'tresult-0001', profileId: 'design',
+    url: 'https://example.test/page', mediaKind: 'page',
+    viewport: { preset: 'desktop', width: 1440, height: 900, responsive: false },
+    providerEvidence: null, linkedAt: NOW, stale: false, staleReason: ''
+  })
+  assert.deepEqual(linked.evaluations, {})
+  assert.deepEqual(linked.job, blankJob())
+  assert.equal(linked.selectedCandidate, null)
+  assert.equal(linked.qcJson, '')
+  assert.deepEqual(linked.capture, resultCapture(), 'capture bound to the same target survives linking')
+  assert.equal(reviewContextMatches(linked, 'design'), true)
+  assert.equal(panelLinkedToQc(linked, 'result'), true)
+})
+
+test('URL change rotates target identity, clears evidence, and stales the context', () => {
+  const makeId = sequentialIds()
+  const linked = linkPanelState({ ...v6State(), capture: resultCapture() }, 'result', { profileId: 'design', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  const next = updatePanelState(linked, 'result', { url: 'https://example.test/other' }, {}, makeId)
+  assert.notEqual(next.browserPanels.result.targetId, 'tresult-0001')
+  assert.match(next.browserPanels.result.targetId, /^t[0-9a-z]+-[0-9a-z]{4,}$/)
+  assert.equal(next.browserPanels.result.inspection, null)
+  assert.equal(next.capture, null)
+  assert.equal(next.reviewContext.stale, true)
+  assert.equal(next.reviewContext.staleReason, 'url-changed')
+  assert.equal(reviewContextMatches(next, 'design'), false)
+  assert.equal(panelLinkedToQc(next, 'result'), false)
+})
+
+test('viewport change rotates page targets but never media targets', () => {
+  const makeId = sequentialIds()
+  const linkedPage = linkPanelState({ ...v6State(), capture: resultCapture() }, 'result', { profileId: 'design', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  const pageNext = updatePanelState(linkedPage, 'result', { preset: 'mobile', width: 390, height: 844 }, {}, makeId)
+  assert.notEqual(pageNext.browserPanels.result.targetId, 'tresult-0001')
+  assert.equal(pageNext.browserPanels.result.url, 'https://example.test/page')
+  assert.equal(pageNext.capture, null)
+  assert.equal(pageNext.reviewContext.staleReason, 'viewport-changed')
+
+  const linkedMedia = linkPanelState(v6State(), 'reference', { profileId: 'higgsfield-image', contextId: 'clink-0002', linkedAt: NOW }, makeId)
+  const mediaNext = updatePanelState(linkedMedia, 'reference', { preset: 'desktop', width: 1440, height: 900 }, {}, makeId)
+  assert.equal(mediaNext.browserPanels.reference.targetId, 'treference-0001')
+  assert.equal(mediaNext.reviewContext.stale, false)
+  assert.equal(reviewContextMatches(mediaNext, 'higgsfield-image'), true)
+})
+
+test('provider provenance identity participates in target identity', () => {
+  const makeId = sequentialIds()
+  const evidence = {
+    source: 'higgsfield-mcp', jobId: 'job-1', status: 'completed', model: 'seedream_v5_pro', soulId: '',
+    mediaType: 'image', prompt: 'p', width: 1024, height: 1024, duration: 0, aspectRatio: '1:1',
+    resolution: '1k', count: 1, referenceCount: 0, resultUrl: 'https://cdn.example.test/shot.png', createdAt: NOW, checkedAt: NOW
+  }
+  const linked = linkPanelState(v6State(), 'reference', { profileId: 'higgsfield-image', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  const rotated = updatePanelState(linked, 'reference', { providerEvidence: evidence }, {}, makeId)
+  assert.notEqual(rotated.browserPanels.reference.targetId, 'treference-0001')
+  assert.equal(rotated.reviewContext.staleReason, 'provenance-changed')
+
+  const refreshed = updatePanelState(rotated, 'reference', { providerEvidence: { ...evidence, checkedAt: '2026-07-18T00:00:00.000Z' } }, {}, makeId)
+  assert.equal(refreshed.browserPanels.reference.targetId, rotated.browserPanels.reference.targetId, 'same provenance identity must not rotate the target')
+  assert.equal(refreshed.reviewContext.staleReason, rotated.reviewContext.staleReason)
+})
+
+test('panel swap rotates both target identities and stales the active context', () => {
+  const makeId = sequentialIds()
+  const linked = linkPanelState({ ...v6State(), capture: resultCapture() }, 'result', { profileId: 'design', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  const swapped = swapPanelsState(linked, makeId)
+  assert.equal(swapped.browserPanels.result.url, 'https://cdn.example.test/shot.png')
+  assert.equal(swapped.browserPanels.reference.url, 'https://example.test/page')
+  assert.notEqual(swapped.browserPanels.result.targetId, 'treference-0001')
+  assert.notEqual(swapped.browserPanels.reference.targetId, 'tresult-0001')
+  assert.equal(swapped.browserPanels.result.inspection, null)
+  assert.equal(swapped.capture, null)
+  assert.equal(swapped.reviewContext.stale, true)
+  assert.equal(swapped.reviewContext.staleReason, 'panels-swapped')
+  assert.equal(panelLinkedToQc(swapped, 'result'), false)
+  assert.equal(panelLinkedToQc(swapped, 'reference'), false)
+})
+
+test('relinking the same tuple is idempotent while overrides create a fresh context', () => {
+  const makeId = sequentialIds()
+  const linked = linkPanelState(v6State(), 'result', { profileId: 'design', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  const reviewed = { ...linked, evaluations: { design: { composition: { status: 'pass', note: 'kept' } } } }
+  const relinked = linkPanelState(reviewed, 'result', { profileId: 'design', contextId: 'cignored-0002', linkedAt: NOW }, makeId)
+  assert.equal(relinked.reviewContext.contextId, 'clink-0001')
+  assert.deepEqual(relinked.evaluations, reviewed.evaluations)
+
+  const overridden = linkPanelState(reviewed, 'result', { profileId: 'midjourney', contextId: 'cnew-0003', linkedAt: NOW }, makeId)
+  assert.equal(overridden.reviewContext.contextId, 'cnew-0003')
+  assert.equal(overridden.reviewContext.profileId, 'midjourney')
+  assert.equal(overridden.qcProfile, 'midjourney')
+  assert.deepEqual(overridden.evaluations, {})
+})
+
+test('restore drops identity-inconsistent live contexts and captures, healing tampered blobs', () => {
+  const defaults = v5Defaults()
+  const makeId = sequentialIds()
+  const linked = linkPanelState(v6State(), 'result', { profileId: 'design', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  const persisted = { ...linked, capture: resultCapture(), evaluations: { design: { composition: { status: 'pass', note: 'live' } } } }
+
+  const roundTrip = migratePersistedState(structuredClone(persisted), defaults)
+  assert.deepEqual(roundTrip.reviewContext, linked.reviewContext, 'consistent v6 tuples restore exactly')
+  assert.deepEqual(roundTrip.capture, resultCapture())
+
+  const urlMismatch = migratePersistedState({ ...structuredClone(persisted), reviewContext: { ...linked.reviewContext, url: 'https://example.test/other' } }, defaults)
+  assert.equal(urlMismatch.reviewContext, null)
+  assert.deepEqual(urlMismatch.evaluations, {}, 'orphaned review families are blanked')
+
+  const kindMismatch = migratePersistedState({ ...structuredClone(persisted), reviewContext: { ...linked.reviewContext, mediaKind: 'image' } }, defaults)
+  assert.equal(kindMismatch.reviewContext, null)
+
+  const viewportMismatch = migratePersistedState({ ...structuredClone(persisted), reviewContext: { ...linked.reviewContext, viewport: { preset: 'mobile', width: 390, height: 844, responsive: false } } }, defaults)
+  assert.equal(viewportMismatch.reviewContext, null)
+
+  const staleSnapshot = migratePersistedState({ ...structuredClone(persisted), reviewContext: { ...linked.reviewContext, stale: true, staleReason: 'url-changed', targetId: 'tolder-target' } }, defaults)
+  assert.equal(staleSnapshot.reviewContext?.stale, true)
+  assert.equal(staleSnapshot.reviewContext?.targetId, 'tolder-target', 'stale snapshots keep their historical identity')
+
+  const captureMismatch = migratePersistedState({ ...structuredClone(persisted), capture: { ...resultCapture(), url: 'https://example.test/other' } }, defaults)
+  assert.equal(captureMismatch.capture, null)
+
+  const tampered = migratePersistedState({
+    schemaVersion: 6,
+    browserPanels: { result: { url: 'https://example.test/page', targetId: 'bad' } },
+    reviewContext: {
+      contextId: 'bad', panelId: 'result', targetId: 'bad', profileId: 'design', url: 'https://example.test/page',
+      mediaKind: 'weird', viewport: { width: 10 }, stale: 'yes', staleReason: 'unknown', linkedAt: NOW
+    },
+    evaluations: { design: { layout: { status: 'pass', note: 'must-clear' } } },
+    candidates: { A: { summary: 'must-clear' } }
+  }, defaults)
+  assert.match(tampered.browserPanels.result.targetId, /^t[0-9a-z]+-[0-9a-z]{4,}$/)
+  assert.equal(tampered.reviewContext, null)
+  assert.deepEqual(tampered.evaluations, {})
+  assert.equal(tampered.candidates.A.summary, '')
+})
+
+test('schema-v6 blobs cannot smuggle legacy-shaped contexts past full-tuple validation', () => {
+  const defaults = v5Defaults()
+  const makeId = sequentialIds()
+  const linked = linkPanelState(v6State(), 'result', { profileId: 'design', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  const smuggled = migratePersistedState({
+    ...structuredClone(linked),
+    schemaVersion: PERSISTED_SCHEMA_VERSION,
+    reviewContext: { profileId: 'design', panelId: 'result', url: 'https://example.test/page' },
+    evaluations: { design: { composition: { status: 'pass', note: 'orphan' } } }
+  }, defaults)
+  assert.equal(smuggled.reviewContext, null, 'v6 blobs must not upgrade legacy-shaped contexts')
+  assert.deepEqual(smuggled.evaluations, {})
+
+  const legacy = migratePersistedState({
+    schemaVersion: 5,
+    browserPanels: { result: { url: 'https://example.test/page', targetId: 'tlegacy-result' } },
+    reviewContext: { profileId: 'design', panelId: 'result', url: 'https://example.test/page' }
+  }, defaults)
+  assert.equal(legacy.reviewContext?.targetId, 'tlegacy-result', 'pre-v6 blobs still migrate URL-matching contexts')
+})
+
+test('restore rejects live contexts whose provenance identity differs from the panel', () => {
+  const defaults = v5Defaults()
+  const makeId = sequentialIds()
+  const evidence = {
+    source: 'higgsfield-mcp', jobId: 'job-a', status: 'completed', model: 'seedream_v5_pro', soulId: '',
+    mediaType: 'image', prompt: 'p', width: 1024, height: 1024, duration: 0, aspectRatio: '1:1',
+    resolution: '1k', count: 1, referenceCount: 0, resultUrl: 'https://cdn.example.test/shot.png', createdAt: NOW, checkedAt: NOW
+  }
+  const base = v6State()
+  base.browserPanels.reference.providerEvidence = structuredClone(evidence)
+  const linked = linkPanelState(base, 'reference', { profileId: 'higgsfield-image', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  const roundTrip = migratePersistedState(structuredClone(linked), defaults)
+  assert.equal(roundTrip.reviewContext?.providerEvidence?.jobId, 'job-a')
+
+  const substituted = structuredClone(linked)
+  substituted.browserPanels.reference.providerEvidence.jobId = 'job-b'
+  substituted.evaluations = { 'higgsfield-image': { c1: { status: 'pass', note: 'orphan' } } }
+  const dropped = migratePersistedState(substituted, defaults)
+  assert.equal(dropped.reviewContext, null, 'live context provenance must match panel provenance')
+  assert.deepEqual(dropped.evaluations, {})
+
+  const staleHistorical = structuredClone(substituted)
+  staleHistorical.reviewContext.stale = true
+  staleHistorical.reviewContext.staleReason = 'provenance-changed'
+  const preserved = migratePersistedState(staleHistorical, defaults)
+  assert.equal(preserved.reviewContext?.providerEvidence?.jobId, 'job-a', 'stale snapshots keep historical provenance')
+})
+
+test('failed loads explicitly stale the linked context without touching other state', () => {
+  const makeId = sequentialIds()
+  const linked = linkPanelState({ ...v6State(), capture: resultCapture() }, 'result', { profileId: 'design', contextId: 'clink-0001', linkedAt: NOW }, makeId)
+  const failed = markPanelLoadFailedState(linked, 'result')
+  assert.equal(failed.reviewContext.stale, true)
+  assert.equal(failed.reviewContext.staleReason, 'load-failed')
+  assert.deepEqual(failed.capture, resultCapture(), 'already-verified evidence is preserved')
+  assert.equal(failed.browserPanels.result.targetId, 'tresult-0001', 'target identity does not rotate on load failure')
+  assert.equal(reviewContextMatches(failed, 'design'), false)
+  assert.equal(panelLinkedToQc(failed, 'result'), false)
+
+  assert.equal(markPanelLoadFailedState(failed, 'result'), failed, 'already-stale context is a no-op')
+  assert.equal(markPanelLoadFailedState(linked, 'reference'), linked, 'failure on an unlinked panel is a no-op')
+  const rotated = { ...linked, browserPanels: { ...linked.browserPanels, result: { ...linked.browserPanels.result, targetId: 'tother-0001' } } }
+  assert.equal(markPanelLoadFailedState(rotated, 'result'), rotated, 'target mismatch is a no-op')
+
+  const defaults = v5Defaults()
+  const restored = migratePersistedState(structuredClone({ ...failed, schemaVersion: 6 }), defaults)
+  assert.equal(restored.reviewContext?.stale, true)
+  assert.equal(restored.reviewContext?.staleReason, 'load-failed', 'load-failed stale snapshots survive restart')
+})
+test('validates every agent command and rejects malformed command payloads', () => {
+  const commands = [
+    { id: 'status', op: 'status', payload: {} },
+    { id: 'target', op: 'set-target', panelId: 'result', payload: { url: 'https://example.test' } },
+    { id: 'link', op: 'link', panelId: 'result', payload: {} },
+    { id: 'capture', op: 'capture', panelId: 'result', payload: {} },
+    { id: 'inspect', op: 'inspect', panelId: 'result', payload: {} },
+    { id: 'checks', op: 'page-checks', panelId: 'result', payload: {} },
+    { id: 'check', op: 'set-check', payload: { profileId: 'design', checkId: 'contrast', status: 'pass' } },
+    { id: 'score', op: 'score-candidate', payload: { candidateId: 'A', score: 90 } },
+    { id: 'select', op: 'select-candidate', payload: { candidateId: 'A' } },
+    { id: 'import', op: 'import-qc', payload: { json: JSON.stringify(validDocument()) } }
+  ]
+  for (const command of commands) assert.equal(validateAgentCommand(command).ok, true, command.op)
+  assert.equal(validateAgentCommand({ id: '', op: 'status', payload: {} }).ok, false)
+  assert.equal(validateAgentCommand({ id: 'bad', op: 'unknown', payload: {} }).ok, false)
+  assert.equal(validateAgentCommand({ id: 'bad', op: 'set-target', panelId: 'result', payload: { url: 'https://example.test', extra: true } }).ok, false)
+})
+
+test('applies linked agent QC commands and emits the complete status snapshot contract', () => {
+  let state = migratePersistedState({}, v5Defaults())
+  const makeId = prefix => `${prefix}agent-0000`
+  assert.equal(applyAgentCommand(state, { op: 'set-check', payload: { profileId: 'design', checkId: 'contrast', status: 'pass' } }, makeId).error, 'Link the target in the Browser pane before editing QC')
+  state = applyAgentCommand(state, { op: 'set-target', panelId: 'result', payload: { url: 'https://example.test' } }, makeId).state
+  state = applyAgentCommand(state, { op: 'link', panelId: 'result', payload: {} }, makeId).state
+  const scored = applyAgentCommand(state, { op: 'score-candidate', payload: { candidateId: 'A', score: 91, disposition: 'PASS' } }, makeId)
+  assert.equal(scored.state.candidates.A.score, 91)
+  assert.equal(applyAgentCommand({ ...scored.state, reviewContext: { ...scored.state.reviewContext, stale: true } }, { op: 'score-candidate', payload: { candidateId: 'A', score: 1 } }, makeId).error, 'Link the target in the Browser pane before editing QC')
+  assert.deepEqual(Object.keys(agentStatusSnapshot(scored.state)).sort(), ['candidates', 'capture', 'evaluations', 'jobState', 'panels', 'qcProfile', 'qcTargetPanelId', 'reviewContext', 'selectedCandidate'].sort())
+  assert.deepEqual(Object.keys(agentStatusSnapshot(scored.state).reviewContext).sort(), ['contextId', 'mediaKind', 'panelId', 'profileId', 'providerJobId', 'stale', 'staleReason', 'targetId', 'url'].sort())
+  assert.deepEqual(Object.keys(agentStatusSnapshot(scored.state).panels).sort(), ['reference', 'result'])
 })

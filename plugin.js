@@ -16,7 +16,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const PLUGIN_ID = 'visual-workbench'
-const PLUGIN_VERSION = '0.5.1'
+const PLUGIN_VERSION = '0.6.0'
 const BROWSER_PANE_ID = `${PLUGIN_ID}:browser`
 const QC_PANE_ID = `${PLUGIN_ID}:qc`
 const CLOSED_PANE_ATOM = atom(false)
@@ -79,7 +79,7 @@ const QC_PROFILES = {
 }
 
 // WORKBENCH_CORE_BEGIN
-const PERSISTED_SCHEMA_VERSION = 5
+const PERSISTED_SCHEMA_VERSION = 6
 const QC_DOCUMENT_SCHEMA_VERSION = 1
 const MAX_QC_JSON_BYTES = 64 * 1024
 const CANDIDATE_IDS = ['A', 'B', 'C', 'D']
@@ -102,6 +102,32 @@ const QC_DIMENSIONS = [
   'artifacts', 'typography', 'colorMaterialFidelity', 'productionReadiness'
 ]
 
+function createId(prefix) {
+  return `${prefix}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6).padEnd(4, '0')}`
+}
+
+function validId(value, prefix) {
+  return typeof value === 'string' && value.length <= 64 && new RegExp(`^${prefix}[0-9a-z]+-[0-9a-z]{4,}$`).test(value)
+}
+
+function mediaKind(url) {
+  const path = String(url || '').split(/[?#]/, 1)[0].toLowerCase()
+  if (/\.(png|jpe?g|webp|gif|avif|bmp|svg)$/.test(path) || /^data:image\//i.test(url)) return 'image'
+  if (/\.(mp4|mov|webm|mkv|avi)$/.test(path)) return 'video'
+  return 'page'
+}
+
+function viewportFor(panel) {
+  const preset = {
+    desktop: [1440, 900], laptop: [1280, 800], tablet: [768, 1024], mobile: [390, 844]
+  }[panel.preset]
+  return {
+    preset: panel.preset,
+    width: Math.max(240, Number(preset?.[0] || panel.width) || 1440),
+    height: Math.max(240, Number(preset?.[1] || panel.height) || 900),
+    responsive: panel.preset === 'responsive'
+  }
+}
 function blankCandidate(id) {
   return {
     id, summary: '', score: 0, disposition: 'REJECT', evidence: [], repairPrompt: '',
@@ -119,11 +145,11 @@ function blankJob() {
 
 const DEFAULT_BROWSER_PANELS = {
   result: {
-    url: '', preset: 'desktop', width: 1440, height: 900, displayMode: 'fit', qcProfileHint: '',
+    url: '', targetId: createId('t'), preset: 'desktop', width: 1440, height: 900, displayMode: 'fit', qcProfileHint: '',
     providerEvidence: null, inspection: null
   },
   reference: {
-    url: '', preset: 'mobile', width: 390, height: 844, displayMode: 'fit', qcProfileHint: '',
+    url: '', targetId: createId('t'), preset: 'mobile', width: 390, height: 844, displayMode: 'fit', qcProfileHint: '',
     providerEvidence: null, inspection: null
   }
 }
@@ -147,6 +173,7 @@ let pluginContext = null
 let state = { ...DEFAULT_STATE }
 const listeners = new Set()
 const browserWebviews = new Map()
+const browserMediaElements = new Map()
 const browserWebviewSyncInstalled = new WeakSet()
 const browserViewportTasks = new Map()
 
@@ -171,16 +198,18 @@ function restoredState(saved) {
   const source = isRecord(saved) ? saved : {}
   const legacyUrl = typeof source.browserUrl === 'string' ? source.browserUrl : ''
   const savedCandidates = isRecord(source.candidates) ? source.candidates : {}
-  return {
+  const browserPanels = {
+    result: restoredPanel(source.browserPanels?.result, DEFAULT_BROWSER_PANELS.result, legacyUrl),
+    reference: restoredPanel(source.browserPanels?.reference, DEFAULT_BROWSER_PANELS.reference)
+  }
+  const reviewContext = restoredReviewContext(source.reviewContext, browserPanels, source.schemaVersion !== PERSISTED_SCHEMA_VERSION)
+  const restored = {
     ...DEFAULT_STATE,
     schemaVersion: PERSISTED_SCHEMA_VERSION,
     browserSplit: source.browserSplit === true,
-    browserPanels: {
-      result: restoredPanel(source.browserPanels?.result, DEFAULT_BROWSER_PANELS.result, legacyUrl),
-      reference: restoredPanel(source.browserPanels?.reference, DEFAULT_BROWSER_PANELS.reference)
-    },
+    browserPanels,
     qcTargetPanelId: ['result', 'reference'].includes(source.qcTargetPanelId) ? source.qcTargetPanelId : 'result',
-    reviewContext: restoredReviewContext(source.reviewContext),
+    reviewContext,
     qcProfile: QC_PROFILE_IDS.includes(source.qcProfile) ? source.qcProfile : DEFAULT_STATE.qcProfile,
     evaluations: restoredEvaluations(source.evaluations),
     job: restoredJob(source.job),
@@ -189,6 +218,24 @@ function restoredState(saved) {
     qcJson: typeof source.qcJson === 'string' ? source.qcJson : '',
     capture: restoredCapture(source.capture)
   }
+  if (!restored.capture && source.schemaVersion !== PERSISTED_SCHEMA_VERSION && isRecord(source.capture)) {
+    const panel = browserPanels[source.capture.panelId]
+    if (panel && source.capture.url === panel.url) {
+      restored.capture = restoredCapture({ ...source.capture, targetId: panel.targetId })
+    }
+  }
+  if (restored.capture) {
+    const panel = browserPanels[restored.capture.panelId]
+    if (!panel || restored.capture.targetId !== panel.targetId || restored.capture.url !== panel.url) restored.capture = null
+  }
+  if (!reviewContext && source.reviewContext) {
+    restored.evaluations = {}
+    restored.job = blankJob()
+    restored.candidates = blankCandidates()
+    restored.selectedCandidate = null
+    restored.qcJson = ''
+  }
+  return restored
 }
 
 function schemaError(path, message) {
@@ -226,7 +273,7 @@ function providerRecords(value, depth = 0, seen = new Set()) {
   const looksLikeGeneration = Boolean(
     value.id || value.jobId || value.job_id || value.model || value.params || value.status || value.type
   )
-  const nested = ['structuredContent', 'result', 'data', 'items', 'generations', 'jobs']
+  const nested = ['structuredContent', 'raw_data', 'result', 'data', 'items', 'generations', 'jobs']
     .flatMap(key => providerRecords(value[key], depth + 1, seen))
   return looksLikeGeneration ? [value, ...nested] : nested
 }
@@ -239,6 +286,7 @@ function resultUrls(record) {
   add(record.url)
   add(record.resultUrl)
   add(record.result_url)
+  add(record.min_result_url)
   const results = isRecord(record.results) ? record.results : {}
   add(results.rawUrl)
   add(results.minUrl)
@@ -263,6 +311,7 @@ function restoredProviderEvidence(value) {
     jobId: boundedMetadataString(value.jobId, 128),
     status: boundedMetadataString(value.status, 64),
     model: boundedMetadataString(value.model, 128),
+    soulId: boundedMetadataString(value.soulId, 128),
     mediaType: ['image', 'video', 'audio', '3d'].includes(value.mediaType) ? value.mediaType : '',
     prompt: boundedMetadataString(value.prompt),
     width,
@@ -276,6 +325,9 @@ function restoredProviderEvidence(value) {
     createdAt: typeof value.createdAt === 'string' || Number.isFinite(value.createdAt) ? value.createdAt : '',
     checkedAt: boundedMetadataString(value.checkedAt, 64)
   }
+}
+function providerEvidenceIdentity(evidence) {
+  return evidence ? `${evidence.jobId}|${evidence.resultUrl}|${evidence.model}` : ''
 }
 
 function providerEvidenceFor(input = {}) {
@@ -296,7 +348,8 @@ function providerEvidenceFor(input = {}) {
     source: 'higgsfield-mcp',
     jobId: record.id || record.jobId || record.job_id || '',
     status: record.status || '',
-    model: record.model || params.model || '',
+    model: record.model || record.job_set_type || params.model || '',
+    soulId: params.custom_reference_id || '',
     mediaType,
     prompt: params.prompt || record.prompt || '',
     width: params.width || record.width || 0,
@@ -321,24 +374,135 @@ function restoredInspection(value) {
   }
 }
 
-function restoredReviewContext(value) {
+function restoredReviewContext(value, panels, allowLegacy = false) {
   if (!isRecord(value) || !QC_PROFILE_IDS.includes(value.profileId) || !['result', 'reference'].includes(value.panelId)) return null
+  const panel = panels[value.panelId]
+  const legacy = !Object.hasOwn(value, 'contextId')
+  if (legacy) {
+    const url = boundedMetadataString(value.url, 4096)
+    if (!allowLegacy || !url || !panel?.url || url !== panel.url) return null
+    return {
+      contextId: createId('c'), panelId: value.panelId, targetId: panel.targetId, profileId: value.profileId,
+      url, mediaKind: mediaKind(url), viewport: viewportFor(panel),
+      providerEvidence: restoredProviderEvidence(panel.providerEvidence), linkedAt: new Date().toISOString(), stale: false, staleReason: ''
+    }
+  }
+  if (!validId(value.contextId, 'c') || !validId(value.targetId, 't') || (!value.stale && !panel?.url) ||
+      !['image', 'video', 'page'].includes(value.mediaKind) || !isRecord(value.viewport) ||
+      typeof value.stale !== 'boolean' || !['', 'url-changed', 'viewport-changed', 'panels-swapped', 'provenance-changed', 'load-failed'].includes(value.staleReason) ||
+      typeof value.linkedAt !== 'string' || value.linkedAt.length > 64) return null
   const url = boundedMetadataString(value.url, 4096)
-  return url ? { profileId: value.profileId, panelId: value.panelId, url } : null
+  const viewport = value.viewport
+  if (!url || !Number.isFinite(viewport.width) || viewport.width < 240 || !Number.isFinite(viewport.height) ||
+      viewport.height < 240 || typeof viewport.preset !== 'string' || typeof viewport.responsive !== 'boolean') return null
+  const providerEvidence = restoredProviderEvidence(value.providerEvidence)
+  if (!value.stale && (value.targetId !== panel.targetId || url !== panel.url || value.mediaKind !== mediaKind(panel.url) ||
+      providerEvidenceIdentity(providerEvidence) !== providerEvidenceIdentity(panel.providerEvidence) ||
+      (value.mediaKind === 'page' && JSON.stringify({
+        preset: viewport.preset, width: Math.round(viewport.width), height: Math.round(viewport.height), responsive: viewport.responsive
+      }) !== JSON.stringify(viewportFor(panel))))) return null
+  return {
+    contextId: value.contextId, panelId: value.panelId, targetId: value.targetId, profileId: value.profileId,
+    url, mediaKind: value.mediaKind,
+    viewport: { preset: viewport.preset, width: Math.round(viewport.width), height: Math.round(viewport.height), responsive: viewport.responsive },
+    providerEvidence, linkedAt: value.linkedAt,
+    stale: value.stale, staleReason: value.staleReason
+  }
 }
 
 function reviewContextMatches(current, profileId) {
   const panelId = current.qcTargetPanelId || 'result'
-  const panel = current.browserPanels[panelId] || DEFAULT_BROWSER_PANELS[panelId]
-  return Boolean(
-    panel.url && current.reviewContext?.profileId === profileId && current.reviewContext?.panelId === panelId &&
-    current.reviewContext?.url === panel.url
-  )
+  const panel = current.browserPanels[panelId]
+  const context = current.reviewContext
+  return Boolean(panel?.url && context && !context.stale && context.profileId === profileId &&
+    context.panelId === panelId && context.targetId === panel.targetId)
 }
 
-function currentReviewContext(profileId = state.qcProfile) {
-  const panelId = state.qcTargetPanelId || 'result'
-  return { profileId, panelId, url: state.browserPanels[panelId]?.url || '' }
+function panelLinkedToQc(current, panelId) {
+  const panel = current.browserPanels[panelId]
+  const context = current.reviewContext
+  return Boolean(panel?.url && context && !context.stale && current.qcTargetPanelId === panelId &&
+    context.panelId === panelId && context.targetId === panel.targetId && context.profileId === current.qcProfile)
+}
+function updatePanelState(current, panelId, patch, options = {}, makeId = createId) {
+  const panel = current.browserPanels[panelId]
+  if (!panel) return current
+  const { preserveQcProfileHint = false, preserveProviderEvidence = false } = options
+  const urlChanged = Object.hasOwn(patch, 'url') && patch.url !== panel.url
+  const nextUrl = Object.hasOwn(patch, 'url') ? patch.url : panel.url
+  const viewportChanged = ['preset', 'width', 'height'].some(key => Object.hasOwn(patch, key) && patch[key] !== panel[key])
+  const provenanceChanged = Object.hasOwn(patch, 'providerEvidence') &&
+    providerEvidenceIdentity(patch.providerEvidence) !== providerEvidenceIdentity(panel.providerEvidence)
+  const targetChanged = urlChanged || (viewportChanged && mediaKind(nextUrl) === 'page') || provenanceChanged
+  const staleReason = urlChanged ? 'url-changed' : viewportChanged ? 'viewport-changed' : 'provenance-changed'
+  const nextPanel = {
+    ...panel, ...patch,
+    ...(targetChanged ? { targetId: makeId('t'), inspection: null } : {}),
+    ...(urlChanged && !preserveQcProfileHint && !Object.hasOwn(patch, 'qcProfileHint') ? { qcProfileHint: '' } : {}),
+    ...(urlChanged && !preserveProviderEvidence && !Object.hasOwn(patch, 'providerEvidence') ? { providerEvidence: null } : {})
+  }
+  const context = current.reviewContext
+  const reviewContext = targetChanged && context?.panelId === panelId && context.targetId === panel.targetId
+    ? { ...context, stale: true, staleReason }
+    : context
+  return {
+    ...current,
+    browserPanels: { ...current.browserPanels, [panelId]: nextPanel },
+    reviewContext,
+    ...(targetChanged && current.capture?.panelId === panelId ? { capture: null } : {})
+  }
+}
+
+function linkPanelState(current, panelId, input = {}, makeId = createId) {
+  const panel = current.browserPanels[panelId]
+  if (!panel?.url) return current
+  const profileId = QC_PROFILE_IDS.includes(input.profileId)
+    ? input.profileId
+    : QC_PROFILE_IDS.includes(panel.qcProfileHint) ? panel.qcProfileHint : 'design'
+  const previous = current.reviewContext
+  const same = previous && !previous.stale && previous.panelId === panelId &&
+    previous.targetId === panel.targetId && previous.profileId === profileId
+  const reviewContext = same ? previous : {
+    contextId: input.contextId || makeId('c'), panelId, targetId: panel.targetId, profileId, url: panel.url,
+    mediaKind: mediaKind(panel.url), viewport: viewportFor(panel),
+    providerEvidence: restoredProviderEvidence(panel.providerEvidence), linkedAt: input.linkedAt || new Date().toISOString(),
+    stale: false, staleReason: ''
+  }
+  return {
+    ...current,
+    browserSplit: panelId === 'reference' ? true : current.browserSplit,
+    qcProfile: profileId, qcTargetPanelId: panelId, reviewContext,
+    ...(same ? {} : {
+      evaluations: {}, job: blankJob(), candidates: blankCandidates(), selectedCandidate: null, qcJson: '',
+      ...(current.capture?.targetId !== panel.targetId ? { capture: null } : {})
+    })
+  }
+}
+
+function swapPanelsState(current, makeId = createId) {
+  const result = current.browserPanels.result
+  const reference = current.browserPanels.reference
+  if (!result || !reference) return current
+  const context = current.reviewContext
+  return {
+    ...current,
+    browserPanels: {
+      ...current.browserPanels,
+      result: { ...reference, targetId: makeId('t'), inspection: null },
+      reference: { ...result, targetId: makeId('t'), inspection: null }
+    },
+    reviewContext: context && !context.stale && ['result', 'reference'].includes(context.panelId)
+      ? { ...context, stale: true, staleReason: 'panels-swapped' }
+      : context,
+    capture: null
+  }
+}
+
+function markPanelLoadFailedState(current, panelId) {
+  const panel = current.browserPanels[panelId]
+  const context = current.reviewContext
+  if (!panel || !context || context.stale || context.panelId !== panelId || context.targetId !== panel.targetId) return current
+  return { ...current, reviewContext: { ...context, stale: true, staleReason: 'load-failed' } }
 }
 
 function restoredDimension(value) {
@@ -380,6 +544,7 @@ function restoredPanel(value, defaults, legacyUrl = '') {
   const source = isRecord(value) ? value : {}
   return {
     url: typeof source.url === 'string' ? source.url : legacyUrl,
+    targetId: validId(source.targetId, 't') ? source.targetId : createId('t'),
     preset: typeof source.preset === 'string' ? source.preset : defaults.preset,
     width: Number.isFinite(source.width) && source.width >= 240 ? source.width : defaults.width,
     height: Number.isFinite(source.height) && source.height >= 240 ? source.height : defaults.height,
@@ -406,16 +571,14 @@ function restoredEvaluations(value) {
 }
 
 function restoredCapture(value) {
-  if (!isRecord(value) || !['result', 'reference'].includes(value.panelId)) return null
+  if (!isRecord(value) || !['result', 'reference'].includes(value.panelId) || !validId(value.targetId, 't')) return null
   if (!Number.isInteger(value.width) || value.width <= 0 || !Number.isInteger(value.height) || value.height <= 0) return null
   if (typeof value.path !== 'string' || !value.path) return null
   return {
-    panelId: value.panelId,
-    url: typeof value.url === 'string' ? value.url : '',
-    width: value.width,
-    height: value.height,
+    panelId: value.panelId, targetId: value.targetId, url: typeof value.url === 'string' ? value.url : '',
+    width: value.width, height: value.height,
     createdAt: Number.isFinite(value.createdAt) ? value.createdAt : typeof value.createdAt === 'string' ? value.createdAt : '',
-    path: typeof value.path === 'string' ? value.path : ''
+    path: value.path
   }
 }
 
@@ -513,7 +676,7 @@ function qcDocumentFromState() {
 
 // Provider descriptor registry. Midjourney is the first adapter: its QC wire
 // format is the frozen schema-v1 document contract (`validateQcDocument`).
-// Descriptor dimensions MUST be drawn from the persisted schema-v5 candidate
+// Descriptor dimensions MUST be drawn from the persisted schema-v6 candidate
 // dimension vocabulary (`QC_DIMENSIONS`) so structured review state stays
 // storable without a persisted-schema bump; `assertProviderRegistry` enforces
 // this at module init.
@@ -588,7 +751,7 @@ function assertProviderRegistry() {
     if (!QC_PROFILE_IDS.includes(provider.profileId)) throw new Error(`Provider ${providerId}: profileId must be a known QC profile`)
     if (provider.candidateIds !== CANDIDATE_IDS) throw new Error(`Provider ${providerId}: candidateIds must reuse the shared candidate vocabulary`)
     for (const key of provider.dimensions) {
-      if (!QC_DIMENSIONS.includes(key)) throw new Error(`Provider ${providerId}: dimension ${key} is not storable in persisted schema v2`)
+      if (!QC_DIMENSIONS.includes(key)) throw new Error(`Provider ${providerId}: dimension ${key} is not storable in persisted schema v6`)
       if (typeof provider.dimensionLabels[key] !== 'string' || !provider.dimensionLabels[key]) {
         throw new Error(`Provider ${providerId}: dimension ${key} must have a label`)
       }
@@ -619,28 +782,106 @@ function qcProfileFor(input = {}) {
   if (/\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) || toolName.includes('generate_video')) return 'higgsfield-video'
   return matches.length ? matches[0].profileId : 'design'
 }
+const AGENT_COMMAND_OPS = ['status', 'set-target', 'link', 'capture', 'inspect', 'page-checks', 'set-check', 'score-candidate', 'select-candidate', 'import-qc']
+const AGENT_PANEL_IDS = ['result', 'reference']
+const AGENT_CHECK_STATUSES = ['pass', 'fail', 'na', 'pending']
+
+function agentCommandError(message) { return { ok: false, error: message } }
+function hasOnlyKeys(value, keys) { return Object.keys(value).every(key => keys.includes(key)) }
+function validAgentString(value, max) { return typeof value === 'string' && value.length <= max }
+
+function validateAgentCommand(value) {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['id', 'op', 'panelId', 'payload'])) return agentCommandError('Command must be an object with only id, op, panelId, and payload')
+  if (!validAgentString(value.id, 64) || !value.id) return agentCommandError('id must be a non-empty string of at most 64 characters')
+  if (!AGENT_COMMAND_OPS.includes(value.op)) return agentCommandError('op is unknown')
+  if (!isRecord(value.payload)) return agentCommandError('payload must be an object')
+  const needsPanel = ['set-target', 'link', 'capture', 'inspect', 'page-checks'].includes(value.op)
+  if (needsPanel ? !AGENT_PANEL_IDS.includes(value.panelId) : Object.hasOwn(value, 'panelId')) return agentCommandError(needsPanel ? 'panelId must be result or reference' : 'panelId is not allowed for this op')
+  const payload = value.payload
+  if (value.op === 'status' && hasOnlyKeys(payload, [])) return { ok: true, command: value }
+  if (value.op === 'set-target' && hasOnlyKeys(payload, ['url', 'preset', 'width', 'height']) && validAgentString(payload.url, 4096) && /^(https?|file|data):/i.test(payload.url) && (!Object.hasOwn(payload, 'preset') || validAgentString(payload.preset, 64)) && (!Object.hasOwn(payload, 'width') || Number.isInteger(payload.width) && payload.width >= 240) && (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240)) return { ok: true, command: value }
+  if (value.op === 'link' && hasOnlyKeys(payload, ['profileId']) && (!Object.hasOwn(payload, 'profileId') || QC_PROFILE_IDS.includes(payload.profileId))) return { ok: true, command: value }
+  if (['capture', 'inspect', 'page-checks'].includes(value.op) && hasOnlyKeys(payload, [])) return { ok: true, command: value }
+  if (value.op === 'set-check' && hasOnlyKeys(payload, ['profileId', 'checkId', 'status', 'note']) && QC_PROFILE_IDS.includes(payload.profileId) && validAgentString(payload.checkId, 64) && payload.checkId && AGENT_CHECK_STATUSES.includes(payload.status) && (!Object.hasOwn(payload, 'note') || validAgentString(payload.note, 2000))) return { ok: true, command: value }
+  if (value.op === 'score-candidate' && hasOnlyKeys(payload, ['candidateId', 'summary', 'score', 'disposition', 'repairPrompt', 'dimensions']) && CANDIDATE_IDS.includes(payload.candidateId) && (!Object.hasOwn(payload, 'summary') || validAgentString(payload.summary, 2000)) && (!Object.hasOwn(payload, 'score') || Number.isInteger(payload.score) && payload.score >= 0 && payload.score <= 100) && (!Object.hasOwn(payload, 'disposition') || DISPOSITIONS.includes(payload.disposition)) && (!Object.hasOwn(payload, 'repairPrompt') || validAgentString(payload.repairPrompt, 4000)) && (!Object.hasOwn(payload, 'dimensions') || isRecord(payload.dimensions) && Object.entries(payload.dimensions).every(([key, dimension]) => QC_DIMENSIONS.includes(key) && isRecord(dimension) && hasOnlyKeys(dimension, ['score', 'evidence']) && Number.isInteger(dimension.score) && dimension.score >= 0 && dimension.score <= 100 && validAgentString(dimension.evidence, 2000)))) return { ok: true, command: value }
+  if (value.op === 'select-candidate' && hasOnlyKeys(payload, ['candidateId']) && CANDIDATE_IDS.includes(payload.candidateId)) return { ok: true, command: value }
+  if (value.op === 'import-qc' && hasOnlyKeys(payload, ['json']) && validAgentString(payload.json, MAX_QC_JSON_BYTES)) return { ok: true, command: value }
+  return agentCommandError(`Invalid payload for ${value.op}`)
+}
+
+function agentCandidateReviewed(candidate) {
+  return Boolean(candidate?.summary || candidate?.evidence?.length || candidate?.repairPrompt || candidate?.score > 0 ||
+    Object.values(candidate?.dimensions || {}).some(dimension => dimension?.score > 0 || dimension?.evidence))
+}
+
+function agentStatusSnapshot(current) {
+  const context = current.reviewContext
+  return {
+    qcProfile: current.qcProfile,
+    qcTargetPanelId: current.qcTargetPanelId,
+    reviewContext: context ? {
+      contextId: context.contextId, panelId: context.panelId, targetId: context.targetId, profileId: context.profileId,
+      url: context.url, mediaKind: context.mediaKind, stale: context.stale, staleReason: context.staleReason,
+      providerJobId: context.providerEvidence?.jobId || ''
+    } : null,
+    panels: Object.fromEntries(AGENT_PANEL_IDS.map(panelId => {
+      const panel = current.browserPanels[panelId] || {}
+      return [panelId, { url: panel.url || '', targetId: panel.targetId || '', mediaKind: mediaKind(panel.url) }]
+    })),
+    capture: current.capture ? { panelId: current.capture.panelId, targetId: current.capture.targetId, width: current.capture.width, height: current.capture.height, path: current.capture.path } : null,
+    evaluations: Object.fromEntries(Object.entries(current.evaluations || {}).map(([profileId, checks]) => [profileId, Object.fromEntries(Object.entries(checks || {}).map(([checkId, evaluation]) => [checkId, { status: evaluation.status }]))])),
+    candidates: Object.fromEntries(CANDIDATE_IDS.map(id => {
+      const candidate = current.candidates?.[id] || blankCandidate(id)
+      return [id, { score: candidate.score, disposition: candidate.disposition, reviewed: agentCandidateReviewed(candidate) }]
+    })),
+    selectedCandidate: current.selectedCandidate,
+    jobState: current.job?.state || 'DRAFT'
+  }
+}
+
+function applyAgentCommand(current, command, makeId = createId) {
+  const guardError = 'Link the target in the Browser pane before editing QC'
+  const { op, payload } = command
+  if (op === 'status') return { state: current, summary: 'Status snapshot' }
+  if (op === 'set-target') {
+    const patch = Object.fromEntries(Object.entries(payload).filter(([key]) => ['url', 'preset', 'width', 'height'].includes(key)))
+    return { state: updatePanelState(current, command.panelId, patch, {}, makeId), summary: `Set ${command.panelId} target` }
+  }
+  if (op === 'link') {
+    const panel = current.browserPanels[command.panelId]
+    const profileId = payload.profileId || (QC_PROFILE_IDS.includes(panel?.qcProfileHint) ? panel.qcProfileHint : qcProfileFor({ src: panel?.url }))
+    if (!panel?.url) return { error: `Open a ${command.panelId} target before linking it to Quality Control` }
+    return { state: linkPanelState(current, command.panelId, { profileId }, makeId), summary: `Linked ${command.panelId} to ${profileId}` }
+  }
+  if (op === 'set-check') {
+    if (!reviewContextMatches(current, payload.profileId)) return { error: guardError }
+    const profile = { ...(current.evaluations[payload.profileId] || {}) }
+    profile[payload.checkId] = { ...profile[payload.checkId], status: payload.status, ...(Object.hasOwn(payload, 'note') ? { note: payload.note } : {}) }
+    return { state: { ...current, evaluations: { ...current.evaluations, [payload.profileId]: profile } }, summary: `Set ${payload.checkId} to ${payload.status}` }
+  }
+  if (op === 'score-candidate') {
+    if (!reviewContextMatches(current, current.qcProfile)) return { error: guardError }
+    const candidate = current.candidates[payload.candidateId]
+    const patch = Object.fromEntries(Object.entries(payload).filter(([key]) => ['summary', 'score', 'disposition', 'repairPrompt'].includes(key)))
+    if (payload.dimensions) patch.dimensions = { ...candidate.dimensions, ...payload.dimensions }
+    return { state: { ...current, candidates: { ...current.candidates, [payload.candidateId]: { ...candidate, ...patch } } }, summary: `Scored candidate ${payload.candidateId}` }
+  }
+  if (op === 'select-candidate') {
+    if (!reviewContextMatches(current, current.qcProfile)) return { error: guardError }
+    return { state: { ...current, selectedCandidate: payload.candidateId }, summary: `Selected candidate ${payload.candidateId}` }
+  }
+  return { error: `${op} is not a pure agent command` }
+}
 // WORKBENCH_CORE_END
 
 function setState(patch) {
   state = { ...state, ...patch }
-  pluginContext?.storage.set('workbench.v5', persistedState())
+  pluginContext?.storage.set('workbench.v6', persistedState())
   listeners.forEach(listener => listener())
 }
 
-function setBrowserPanel(panelId, patch, { preserveQcProfileHint = false, preserveProviderEvidence = false } = {}) {
-  const panel = state.browserPanels[panelId] || DEFAULT_BROWSER_PANELS[panelId]
-  const urlChanged = Object.hasOwn(patch, 'url') && patch.url !== panel.url
-  const nextPanel = {
-    ...panel,
-    ...patch,
-    ...(urlChanged && !preserveQcProfileHint && !Object.hasOwn(patch, 'qcProfileHint') ? { qcProfileHint: '' } : {}),
-    ...(urlChanged && !preserveProviderEvidence && !Object.hasOwn(patch, 'providerEvidence') ? { providerEvidence: null } : {}),
-    ...(urlChanged && !Object.hasOwn(patch, 'inspection') ? { inspection: null } : {})
-  }
-  setState({
-    browserPanels: { ...state.browserPanels, [panelId]: nextPanel },
-    ...(urlChanged && state.capture?.panelId === panelId ? { capture: null } : {})
-  })
+function setBrowserPanel(panelId, patch, options = {}) {
+  setState(updatePanelState(state, panelId, patch, options, createId))
 }
 
 function subscribe(listener) {
@@ -682,12 +923,6 @@ function normalizeUrl(raw) {
   return `https://${value}`
 }
 
-function mediaKind(url) {
-  const path = String(url || '').split(/[?#]/, 1)[0].toLowerCase()
-  if (/\.(png|jpe?g|webp|gif|avif|bmp|svg)$/.test(path) || /^data:image\//i.test(url)) return 'image'
-  if (/\.(mp4|mov|webm|mkv|avi)$/.test(path)) return 'video'
-  return 'page'
-}
 
 function statusVariant(status) {
   if (status === 'pass') return 'default'
@@ -705,14 +940,6 @@ const VIEWPORT_PRESETS = {
   custom: { label: 'Custom' }
 }
 
-function viewportFor(panel) {
-  const preset = VIEWPORT_PRESETS[panel.preset] || VIEWPORT_PRESETS.custom
-  return {
-    responsive: panel.preset === 'responsive',
-    width: Math.max(240, Number(preset.width || panel.width) || 1440),
-    height: Math.max(240, Number(preset.height || panel.height) || 900)
-  }
-}
 
 async function currentBrowserUrl(browserApi, guestId, webview, fallback) {
   const guest = await browserApi.metrics?.(guestId)
@@ -721,26 +948,52 @@ async function currentBrowserUrl(browserApi, guestId, webview, fallback) {
 
 async function captureBrowserPanel(panelId, { save = false } = {}) {
   const panel = state.browserPanels[panelId] || DEFAULT_BROWSER_PANELS[panelId]
+  const kind = mediaKind(panel.url)
   const browserApi = window.hermesDesktop?.browser
   const webview = browserWebviews.get(panelId)
   const guestId = webview?.getWebContentsId?.()
-  if (!panel.url || mediaKind(panel.url) !== 'page' || !browserApi?.capture || !Number.isInteger(guestId)) {
+  if (!panel.url) {
     throw new Error('Open the linked page in the Browser pane before capturing evidence')
   }
 
+  if (kind === 'image' || kind === 'video') {
+    const element = browserMediaElements.get(panelId)
+    const currentSrc = String(element?.currentSrc || element?.src || '')
+    const ready = kind === 'image'
+      ? Boolean(element?.complete && element?.naturalWidth > 0 && element?.naturalHeight > 0)
+      : Boolean(element?.readyState >= 2 && element?.videoWidth > 0 && element?.videoHeight > 0)
+    if (!element || !ready || comparableUrl(currentSrc) !== comparableUrl(panel.url)) {
+      throw new Error('The exact linked media is not ready in the Browser pane')
+    }
+    const evidence = {
+      panelId, targetId: panel.targetId, url: panel.url,
+      width: kind === 'image' ? element.naturalWidth : element.videoWidth,
+      height: kind === 'image' ? element.naturalHeight : element.videoHeight,
+      createdAt: Date.now(), path: ''
+    }
+    if (state.browserPanels[panelId]?.targetId !== panel.targetId) {
+      throw new Error('Target changed during capture; evidence was not attached')
+    }
+    setState({ capture: evidence })
+    return { ...evidence, canceled: false }
+  }
+
+  if (!browserApi?.capture || !Number.isInteger(guestId)) {
+    throw new Error('Open the linked page in the Browser pane before capturing evidence')
+  }
+
+  const startTargetId = panel.targetId
+  const startUrl = panel.url
   const sourceUrl = await currentBrowserUrl(browserApi, guestId, webview, panel.url)
-  if (sourceUrl !== panel.url) {
-    const preserveProvenance = comparableUrl(sourceUrl) === comparableUrl(panel.url)
-    setBrowserPanel(panelId, { url: sourceUrl }, {
-      preserveProviderEvidence: preserveProvenance,
-      preserveQcProfileHint: preserveProvenance
-    })
+  if (sourceUrl !== startUrl) {
+    throw new Error('Target changed during capture; evidence was not attached')
   }
   const capture = await browserApi.capture(guestId)
   if (!capture?.captureId || !Number.isInteger(capture.width) || !Number.isInteger(capture.height)) {
     throw new Error('Host returned an invalid capture')
   }
-  if (state.browserPanels[panelId]?.url !== sourceUrl || await currentBrowserUrl(browserApi, guestId, webview, sourceUrl) !== sourceUrl) {
+  if (state.browserPanels[panelId]?.targetId !== startTargetId ||
+      await currentBrowserUrl(browserApi, guestId, webview, startUrl) !== startUrl) {
     throw new Error('Target changed during capture; evidence was not attached')
   }
 
@@ -753,17 +1006,14 @@ async function captureBrowserPanel(panelId, { save = false } = {}) {
     path = canceled ? '' : String(saved?.path || '')
   }
 
-  if (state.browserPanels[panelId]?.url !== sourceUrl || await currentBrowserUrl(browserApi, guestId, webview, sourceUrl) !== sourceUrl) {
+  if (state.browserPanels[panelId]?.targetId !== startTargetId ||
+      await currentBrowserUrl(browserApi, guestId, webview, startUrl) !== startUrl) {
     throw new Error('Target changed before evidence was attached')
   }
 
   const evidence = {
-    panelId,
-    url: sourceUrl,
-    width: capture.width,
-    height: capture.height,
-    createdAt: capture.createdAt,
-    path
+    panelId, targetId: startTargetId, url: startUrl, width: capture.width, height: capture.height,
+    createdAt: capture.createdAt, path
   }
   setState({ capture: evidence })
   return { ...evidence, canceled }
@@ -773,6 +1023,9 @@ async function inspectBrowserPanel(panelId) {
   const browserApi = window.hermesDesktop?.browser
   const webview = browserWebviews.get(panelId)
   const guestId = webview?.getWebContentsId?.()
+  const startPanel = state.browserPanels[panelId]
+  const startTargetId = startPanel?.targetId
+  const startUrl = startPanel?.url
   if (!browserApi?.cdp || !browserApi?.metrics || !Number.isInteger(guestId)) {
     throw new Error('Open the linked page in the Browser pane before inspecting it')
   }
@@ -784,52 +1037,52 @@ async function inspectBrowserPanel(panelId) {
   const css = layout?.cssVisualViewport || layout?.visualViewport || {}
   const summary = `CDP CSS ${Math.round(css.clientWidth || value.innerWidth || 0)}×${Math.round(css.clientHeight || value.innerHeight || 0)} · DPR ${value.devicePixelRatio || '?'} · visual ${css.zoom || value.visualViewport?.scale || 1} · guest zoom ${guest?.zoomFactor || '?'}`
   const sourceUrl = String(guest?.url || webview?.getURL?.() || state.browserPanels[panelId]?.url || '')
-  const currentUrl = state.browserPanels[panelId]?.url || ''
-  const preserveProvenance = comparableUrl(sourceUrl) === comparableUrl(currentUrl)
-  setBrowserPanel(panelId, {
-    url: sourceUrl,
-    inspection: { url: sourceUrl, summary, checkedAt: new Date().toISOString() }
-  }, { preserveProviderEvidence: preserveProvenance, preserveQcProfileHint: preserveProvenance })
+  const panel = state.browserPanels[panelId]
+  if (!panel || panel.targetId !== startTargetId || sourceUrl !== startUrl) {
+    throw new Error('Target changed during inspection; results were not attached')
+  }
+  setState({
+    browserPanels: {
+      ...state.browserPanels,
+      [panelId]: { ...panel, inspection: { url: sourceUrl, summary, checkedAt: new Date().toISOString() } }
+    }
+  })
   return summary
 }
 
 async function runDesignPageChecks(panelId) {
+  if (!reviewContextMatches(state, 'design')) {
+    throw new Error('Link the target in the Browser pane before running page checks')
+  }
   const browserApi = window.hermesDesktop?.browser
   const webview = browserWebviews.get(panelId)
   const guestId = webview?.getWebContentsId?.()
+  const startContextId = state.reviewContext?.contextId
+  const startTargetId = state.browserPanels[panelId]?.targetId
   if (!browserApi?.audit || !Number.isInteger(guestId)) {
     throw new Error('Open the linked page in the Browser pane before running page checks')
   }
   const audit = await browserApi.audit(guestId)
-  if (!isRecord(audit) || !Number.isFinite(audit.viewportWidth) ||
-      !Number.isFinite(audit.viewportHeight) || !Number.isFinite(audit.documentWidth) ||
-      typeof audit.horizontalOverflow !== 'boolean') {
+  if (!isRecord(audit) || !Number.isFinite(audit.viewportWidth) || !Number.isFinite(audit.viewportHeight) ||
+      !Number.isFinite(audit.documentWidth) || typeof audit.horizontalOverflow !== 'boolean') {
     throw new Error('Page checks returned incomplete CDP audit data')
   }
+  const panel = state.browserPanels[panelId]
+  const context = state.reviewContext
+  const sourceUrl = String(audit.url || webview?.getURL?.() || panel?.url || '')
+  if (!panel || !context || context.contextId !== startContextId || panel.targetId !== startTargetId ||
+      startTargetId !== context.targetId || sourceUrl !== context.url) {
+    throw new Error('Target changed during page checks; results were not attached')
+  }
   const summary = `Page ${audit.viewportWidth || 0}×${audit.viewportHeight || 0} · overflow ${audit.horizontalOverflow ? 1 : 0} · broken images ${audit.brokenImages || 0} · missing labels ${(audit.missingAlt || 0) + (audit.unlabeledControls || 0)}`
-  const sourceUrl = String(audit.url || webview?.getURL?.() || state.browserPanels[panelId]?.url || '')
-  const currentUrl = state.browserPanels[panelId]?.url || ''
-  const preserveProvenance = comparableUrl(sourceUrl) === comparableUrl(currentUrl)
-  setBrowserPanel(panelId, {
-    url: sourceUrl,
-    inspection: { url: sourceUrl, summary, checkedAt: new Date().toISOString() }
-  }, { preserveProviderEvidence: preserveProvenance, preserveQcProfileHint: preserveProvenance })
-  const design = reviewContextMatches(state, 'design') ? { ...(state.evaluations.design || {}) } : {}
-  design.responsive = {
-    status: audit.horizontalOverflow ? 'fail' : 'pass',
-    note: `Current viewport ${audit.viewportWidth || 0}×${audit.viewportHeight || 0}; document width ${audit.documentWidth || 0}.`
-  }
-  design.clipping = {
-    status: audit.horizontalOverflow || audit.brokenImages ? 'fail' : 'pending',
-    note: audit.horizontalOverflow || audit.brokenImages
-      ? `Horizontal overflow ${audit.horizontalOverflow ? 'detected' : 'not detected'}; broken images ${audit.brokenImages || 0}.`
-      : 'No global horizontal overflow or broken images detected. Local clipping and bounds still require visual review.'
-  }
-  design.contrast = {
-    status: 'pending',
-    note: `Automated accessibility preflight: missing image alt ${audit.missingAlt || 0}, unlabeled controls ${audit.unlabeledControls || 0}. Contrast still requires visual review.`
-  }
-  setState({ evaluations: { ...state.evaluations, design }, reviewContext: currentReviewContext('design') })
+  const design = { ...(state.evaluations.design || {}) }
+  design.responsive = { status: audit.horizontalOverflow ? 'fail' : 'pass', note: `Current viewport ${audit.viewportWidth || 0}×${audit.viewportHeight || 0}; document width ${audit.documentWidth || 0}.` }
+  design.clipping = { status: audit.horizontalOverflow || audit.brokenImages ? 'fail' : 'pending', note: audit.horizontalOverflow || audit.brokenImages ? `Horizontal overflow ${audit.horizontalOverflow ? 'detected' : 'not detected'}; broken images ${audit.brokenImages || 0}.` : 'No global horizontal overflow or broken images detected. Local clipping and bounds still require visual review.' }
+  design.contrast = { status: 'pending', note: `Automated accessibility preflight: missing image alt ${audit.missingAlt || 0}, unlabeled controls ${audit.unlabeledControls || 0}. Contrast still requires visual review.` }
+  setState({
+    evaluations: { ...state.evaluations, design },
+    browserPanels: { ...state.browserPanels, [panelId]: { ...panel, inspection: { url: sourceUrl, summary, checkedAt: new Date().toISOString() } } }
+  })
   return summary
 }
 
@@ -839,14 +1092,78 @@ function linkBrowserPanelToQc(panelId, input = {}) {
     host.notify({ kind: 'warning', message: `Open a ${panelId} target before linking it to Quality Control` })
     return false
   }
-  setState({
-    browserSplit: panelId === 'reference' ? true : state.browserSplit,
-    qcProfile: QC_PROFILE_IDS.includes(panel.qcProfileHint) ? panel.qcProfileHint : qcProfileFor({ ...input, src: panel.url }),
-    qcTargetPanelId: panelId
-  })
+  const profileId = QC_PROFILE_IDS.includes(input.profileId)
+    ? input.profileId
+    : QC_PROFILE_IDS.includes(panel.qcProfileHint) ? panel.qcProfileHint : qcProfileFor({ ...input, src: panel.url })
+  setState(linkPanelState(state, panelId, { ...input, profileId }, createId))
   host.panes?.setOpen?.(BROWSER_PANE_ID, true)
   host.panes?.setOpen?.(QC_PANE_ID, true)
   return true
+}
+async function dispatchAgentCommand(ctx, received, seenIds) {
+  const commandId = typeof received?.id === 'string' ? received.id : ''
+  const op = typeof received?.op === 'string' ? received.op : 'invalid'
+  let ok = false
+  let summary = ''
+  let error = ''
+  try {
+    if (!commandId || seenIds.has(commandId)) throw new Error(commandId ? 'Duplicate command id' : 'Command id is required')
+    seenIds.add(commandId)
+    if (seenIds.size > 200) seenIds.delete(seenIds.values().next().value)
+    const validated = validateAgentCommand(received)
+    if (!validated.ok) throw new Error(validated.error)
+    const command = validated.command
+    if (['capture', 'inspect', 'page-checks'].includes(command.op)) {
+      const result = command.op === 'capture'
+        ? await captureBrowserPanel(command.panelId)
+        : command.op === 'inspect'
+          ? await inspectBrowserPanel(command.panelId)
+          : await runDesignPageChecks(command.panelId)
+      summary = typeof result === 'string' ? result : command.op === 'capture' ? `Captured ${command.panelId}` : command.op
+    } else if (command.op === 'import-qc') {
+      if (!reviewContextMatches(state, state.qcProfile)) throw new Error('Link the target in the Browser pane before editing QC')
+      const provider = providerForProfile(state.qcProfile)
+      if (!provider?.qcDocument) throw new Error('Structured QC import is unavailable for this profile')
+      const document = provider.qcDocument.validate(command.payload.json)
+      const formatted = JSON.stringify(document, null, 2)
+      setState({
+        job: document.job, candidates: Object.fromEntries(document.candidates.map(candidate => [candidate.id, candidate])),
+        selectedCandidate: document.selectedCandidate, qcJson: formatted, qcProfile: state.qcProfile
+      })
+      summary = `Imported QC for ${document.job.id}`
+    } else {
+      const applied = applyAgentCommand(state, command, createId)
+      if (applied.error) throw new Error(applied.error)
+      if (applied.state !== state) setState(applied.state)
+      summary = applied.summary
+    }
+    ok = true
+  } catch (caught) {
+    error = caught instanceof Error ? caught.message : String(caught)
+  }
+  const message = ok ? summary : error
+  setState({ agentActivity: { op, at: new Date().toISOString(), ok, summary: message } })
+  host.notify({ kind: ok ? 'success' : 'warning', message: `Agent QC · ${op} — ${message}` })
+  const ack = { id: commandId, ok, error: ok ? '' : error, summary: message, state: agentStatusSnapshot(state) }
+  try {
+    await ctx.rest('/result', { method: 'POST', body: ack })
+  } catch (postError) {
+    host.notify({ kind: 'warning', message: `Agent QC · ${op} — result acknowledgement failed: ${postError instanceof Error ? postError.message : String(postError)}` })
+  }
+}
+
+function AgentActivity({ activity }) {
+  if (!activity) return null
+  return jsxs('div', {
+    style: { alignItems: 'center', color: 'var(--ui-text-quaternary)', display: 'flex', fontSize: 10, gap: 6, padding: '0 12px 8px' },
+    children: [
+      jsx(Badge, { variant: 'muted', children: 'AGENT' }),
+      jsx('span', { children: `${activity.op} · ${new Date(activity.at).toLocaleTimeString()}` })
+    ]
+  })
+}
+function swapBrowserPanels() {
+  setState(swapPanelsState(state, createId))
 }
 
 function PanelIntro({ title, description }) {
@@ -920,6 +1237,10 @@ function BrowserSurface({ panelId, url, viewport }) {
   if (kind === 'image') {
     return jsx('img', {
       alt: 'QC target',
+      ref: element => {
+        if (element) browserMediaElements.set(panelId, element)
+        else browserMediaElements.delete(panelId)
+      },
       src: url,
       style: { display: 'block', height: '100%', objectFit: 'contain', width: '100%' }
     })
@@ -928,6 +1249,10 @@ function BrowserSurface({ panelId, url, viewport }) {
   if (kind === 'video') {
     return jsx('video', {
       controls: true,
+      ref: element => {
+        if (element) browserMediaElements.set(panelId, element)
+        else browserMediaElements.delete(panelId)
+      },
       src: url,
       style: { display: 'block', height: '100%', objectFit: 'contain', width: '100%' }
     })
@@ -956,8 +1281,16 @@ function BrowserSurface({ panelId, url, viewport }) {
               })
             }
           }
+          const syncLoadFailure = event => {
+            if (event?.isMainFrame === false || event?.errorCode === -3) return
+            const next = markPanelLoadFailedState(state, panelId)
+            if (next === state) return
+            setState(next)
+            host.notify({ kind: 'warning', message: `Browser failed to load ${event?.validatedURL || state.browserPanels[panelId]?.url || 'the linked target'}; QC context marked stale` })
+          }
           element.addEventListener('did-navigate', syncUrl)
           element.addEventListener('did-navigate-in-page', syncUrl)
+          element.addEventListener('did-fail-load', syncLoadFailure)
           browserWebviewSyncInstalled.add(element)
         }
       },
@@ -1167,8 +1500,8 @@ function BrowserPanel({ panelId, title }) {
             disabled: !panel.url,
             onClick: () => linkBrowserPanelToQc(panelId),
             size: 'xs',
-            variant: workbench.qcTargetPanelId === panelId ? 'default' : 'outline',
-            children: workbench.qcTargetPanelId === panelId ? 'QC Linked' : 'Review in QC'
+            variant: panelLinkedToQc(workbench, panelId) ? 'default' : 'outline',
+            children: panelLinkedToQc(workbench, panelId) ? 'QC Linked' : 'Review in QC'
           })
         ]
       }),
@@ -1248,13 +1581,7 @@ function BrowserPane() {
           }),
           jsx(Button, {
             disabled: !workbench.browserSplit,
-            onClick: () =>
-              setState({
-                browserPanels: {
-                  result: workbench.browserPanels.reference,
-                  reference: workbench.browserPanels.result
-                }
-              }),
+            onClick: swapBrowserPanels,
             size: 'xs',
             variant: 'outline',
             children: 'Swap'
@@ -1282,7 +1609,12 @@ function BrowserPane() {
 function ProfileSelect({ value }) {
   return jsx('select', {
     'aria-label': 'QC profile',
-    onChange: event => setState({ qcProfile: event.target.value }),
+    onChange: event => {
+      const profileId = event.target.value
+      const panelId = state.qcTargetPanelId || 'result'
+      if (state.browserPanels[panelId]?.url) linkBrowserPanelToQc(panelId, { profileId })
+      else setState({ qcProfile: profileId })
+    },
     style: {
       background: 'var(--ui-surface-secondary)',
       border: '1px solid var(--ui-stroke-secondary)',
@@ -1303,7 +1635,7 @@ function QcTargetCard({ workbench }) {
   const panel = workbench.browserPanels[panelId] || DEFAULT_BROWSER_PANELS[panelId]
   const viewport = viewportFor(panel)
   const hasTarget = Boolean(panel.url)
-  const linkedCapture = workbench.capture?.panelId === panelId && workbench.capture?.url === panel.url
+  const linkedCapture = workbench.capture?.panelId === panelId && workbench.capture?.targetId === panel.targetId
     ? workbench.capture
     : null
   const [status, setStatus] = useState('')
@@ -1340,7 +1672,13 @@ function QcTargetCard({ workbench }) {
         style: { alignItems: 'center', display: 'flex', gap: 6 },
         children: [
           jsx('strong', { style: { fontSize: 11 }, children: 'QC target' }),
-          jsx(Badge, { variant: hasTarget ? 'default' : 'warn', children: hasTarget ? `${panelId.toUpperCase()} LINKED` : 'NO TARGET' }),
+          jsx(Badge, {
+            variant: workbench.reviewContext?.stale && workbench.reviewContext.panelId === panelId ? 'warn' : reviewContextMatches(workbench, workbench.qcProfile) ? 'default' : 'warn',
+            children: workbench.reviewContext?.stale && workbench.reviewContext.panelId === panelId
+              ? 'STALE · TARGET CHANGED'
+              : reviewContextMatches(workbench, workbench.qcProfile) ? `${panelId.toUpperCase()} LINKED`
+              : hasTarget ? 'OPEN · NOT LINKED' : 'NO TARGET'
+          }),
           linkedCapture ? jsx(Badge, { variant: 'muted', children: 'CAPTURE READY' }) : null
         ]
       }),
@@ -1387,7 +1725,7 @@ function QcTargetCard({ workbench }) {
             children: 'Show Browser'
           }),
           jsx(Button, {
-            disabled: !hasTarget || mediaKind(panel.url) !== 'page' || !window.hermesDesktop?.browser?.capture,
+            disabled: !hasTarget || (mediaKind(panel.url) === 'page' && !window.hermesDesktop?.browser?.capture),
             onClick: captureEvidence,
             size: 'xs',
             variant: 'outline',
@@ -1417,12 +1755,13 @@ function CheckRow({ checkId, label, profileId }) {
     : { status: 'pending', note: '' }
 
   const update = patch => {
-    const profile = hasReviewContext ? { ...(workbench.evaluations[profileId] || {}) } : {}
+    if (!reviewContextMatches(state, profileId)) {
+      host.notify({ kind: 'warning', message: 'Link the target in the Browser pane before editing QC' })
+      return
+    }
+    const profile = { ...(state.evaluations[profileId] || {}) }
     profile[checkId] = { ...evaluation, ...patch }
-    setState({
-      evaluations: { ...workbench.evaluations, [profileId]: profile },
-      reviewContext: currentReviewContext(profileId)
-    })
+    setState({ evaluations: { ...state.evaluations, [profileId]: profile } })
   }
 
   return jsxs('div', {
@@ -1481,12 +1820,10 @@ function QcReadinessCard({ workbench, profileId, provider }) {
   const panelId = workbench.qcTargetPanelId || 'result'
   const panel = workbench.browserPanels[panelId] || DEFAULT_BROWSER_PANELS[panelId]
   const hasTarget = Boolean(panel.url)
-  const hasCapture = Boolean(workbench.capture?.panelId === panelId && workbench.capture?.url === panel.url)
-  const hasInspection = Boolean(panel.inspection?.url === panel.url && panel.inspection?.checkedAt)
-  const providerEvidence = panel.providerEvidence?.resultUrl && comparableUrl(panel.providerEvidence.resultUrl) === comparableUrl(panel.url)
-    ? panel.providerEvidence
-    : null
+  const hasCapture = Boolean(workbench.capture?.panelId === panelId && workbench.capture?.targetId === panel.targetId)
+  const hasInspection = Boolean(panel.inspection?.checkedAt && comparableUrl(panel.inspection.url) === comparableUrl(panel.url))
   const hasReviewContext = reviewContextMatches(workbench, profileId)
+  const providerEvidence = hasReviewContext ? workbench.reviewContext.providerEvidence : null
   const manualValues = hasReviewContext ? Object.values(workbench.evaluations[profileId] || {}) : []
   const manualReviewed = manualValues.filter(value => ['pass', 'fail', 'na'].includes(value.status)).length
   const manualTotal = QC_PROFILES[profileId]?.checks?.length || 0
@@ -1521,8 +1858,8 @@ function QcReadinessCard({ workbench, profileId, provider }) {
         jsx('span', { style: { color: 'var(--ui-text-quaternary)', fontSize: 9 }, children: panelId.toUpperCase() })
       ] }),
       jsx(ReadinessRow, {
-        label: 'Target', value: hasTarget ? 'LINKED' : 'MISSING', variant: hasTarget ? 'default' : 'warn',
-        detail: hasTarget ? `${mediaKind(panel.url).toUpperCase()} · ${panel.url}` : 'Open a Result or Reference target.'
+        label: 'Target', value: hasReviewContext ? 'LINKED' : hasTarget ? 'OPEN' : 'MISSING', variant: hasReviewContext ? 'default' : 'warn',
+        detail: hasReviewContext ? `${mediaKind(panel.url).toUpperCase()} · ${panel.url}` : hasTarget ? 'Relink from the Browser pane to bind this target to QC.' : 'Open a Result or Reference target.'
       }),
       jsx(ReadinessRow, {
         label: 'Evidence', value: hasCapture ? 'CAPTURE READY' : 'NOT CAPTURED', variant: hasCapture ? 'default' : 'warn',
@@ -1535,7 +1872,7 @@ function QcReadinessCard({ workbench, profileId, provider }) {
       isHiggsfield ? jsx(ReadinessRow, {
         label: 'MCP metadata', value: providerEvidence ? 'LINKED' : 'NOT LINKED', variant: providerEvidence ? 'default' : 'warn',
         detail: providerEvidence
-          ? `${providerEvidence.jobId || 'job id unavailable'} · ${providerEvidence.model || 'model unavailable'}`
+          ? [providerEvidence.jobId || 'job id unavailable', providerEvidence.model || 'model unavailable', providerEvidence.soulId ? `Soul ${providerEvidence.soulId}` : ''].filter(Boolean).join(' · ')
           : 'Open the asset from a Higgsfield MCP tool result to bind job, model, prompt, and output settings.'
       }) : null,
       providerEvidence ? jsxs('div', { style: { padding: '8px 0 2px' }, children: [
@@ -1578,13 +1915,12 @@ function dispositionVariant(disposition) {
 function JobEditor({ provider, workbench }) {
   const providerName = provider.label.replace(/ QC$/, '')
   const updateJob = patch => {
+    if (!reviewContextMatches(state, provider.profileId)) {
+      host.notify({ kind: 'warning', message: 'Link the target in the Browser pane before editing QC' })
+      return
+    }
     const now = new Date().toISOString()
-    const hasReviewContext = reviewContextMatches(state, provider.profileId)
-    setState({
-      job: { ...workbench.job, ...patch, createdAt: workbench.job.createdAt || now, updatedAt: now },
-      reviewContext: currentReviewContext(provider.profileId),
-      ...(hasReviewContext ? {} : { candidates: blankCandidates(), selectedCandidate: null, qcJson: '' })
-    })
+    setState({ job: { ...state.job, ...patch, createdAt: state.job.createdAt || now, updatedAt: now } })
   }
   const transition = nextState => {
     const allowed = JOB_TRANSITIONS[workbench.job.state] || []
@@ -1629,13 +1965,11 @@ function JobEditor({ provider, workbench }) {
 function CandidateCard({ candidate, provider, selected }) {
   const reviewed = candidateHasReview(candidate)
   const update = patch => {
-    const hasReviewContext = reviewContextMatches(state, provider.profileId)
-    const candidates = hasReviewContext ? state.candidates : blankCandidates()
-    setState({
-      candidates: { ...candidates, [candidate.id]: { ...candidate, ...patch } },
-      reviewContext: currentReviewContext(provider.profileId),
-      ...(hasReviewContext ? {} : { selectedCandidate: null, qcJson: '' })
-    })
+    if (!reviewContextMatches(state, provider.profileId)) {
+      host.notify({ kind: 'warning', message: 'Link the target in the Browser pane before editing QC' })
+      return
+    }
+    setState({ candidates: { ...state.candidates, [candidate.id]: { ...candidate, ...patch } } })
   }
   const updateDimension = (key, patch) => update({
     dimensions: { ...candidate.dimensions, [key]: { ...candidate.dimensions[key], ...patch } }
@@ -1659,12 +1993,11 @@ function CandidateCard({ candidate, provider, selected }) {
           jsx(Badge, { variant: 'muted', children: `${candidate.score}/100` }),
           jsx(Button, {
             onClick: () => {
-              const hasReviewContext = reviewContextMatches(state, provider.profileId)
-              setState({
-                selectedCandidate: candidate.id,
-                reviewContext: currentReviewContext(provider.profileId),
-                ...(hasReviewContext ? {} : { candidates: blankCandidates(), qcJson: '' })
-              })
+              if (!reviewContextMatches(state, provider.profileId)) {
+                host.notify({ kind: 'warning', message: 'Link the target in the Browser pane before editing QC' })
+                return
+              }
+              setState({ selectedCandidate: candidate.id })
             },
             size: 'xs',
             style: { marginLeft: 'auto' },
@@ -1755,20 +2088,20 @@ function StructuredReviewPane({ provider, workbench }) {
   const hasReviewContext = reviewContextMatches(workbench, provider.profileId)
   useEffect(() => setDraft(hasReviewContext ? workbench.qcJson || '' : ''), [hasReviewContext, workbench.qcJson])
   const visibleCandidateIds = provider.profileId === 'higgsfield-image'
-    ? provider.candidateIds.slice(0, Math.min(panel.providerEvidence?.count || 1, provider.candidateIds.length))
+    ? provider.candidateIds.slice(0, Math.min((hasReviewContext ? workbench.reviewContext.providerEvidence?.count : 1) || 1, provider.candidateIds.length))
     : provider.candidateIds
 
   const importQc = () => {
+    if (!reviewContextMatches(state, provider.profileId)) {
+      setImportError('Link the target in the Browser pane before editing QC')
+      return
+    }
     try {
       const document = wire.validate(draft)
       const formatted = JSON.stringify(document, null, 2)
       setState({
-        job: document.job,
-        candidates: Object.fromEntries(document.candidates.map(candidate => [candidate.id, candidate])),
-        selectedCandidate: document.selectedCandidate,
-        qcJson: formatted,
-        qcProfile: provider.profileId,
-        reviewContext: currentReviewContext(provider.profileId)
+        job: document.job, candidates: Object.fromEntries(document.candidates.map(candidate => [candidate.id, candidate])),
+        selectedCandidate: document.selectedCandidate, qcJson: formatted, qcProfile: provider.profileId
       })
       setDraft(formatted)
       setImportError('')
@@ -1804,6 +2137,7 @@ function StructuredReviewPane({ provider, workbench }) {
     style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
     children: [
       jsx(PanelIntro, { title: provider.label, description: QC_PROFILES[provider.profileId].description }),
+      jsx(AgentActivity, { activity: workbench.agentActivity }),
       jsx('div', { style: { padding: '0 12px 8px' }, children: jsx(ProfileSelect, { value: workbench.qcProfile }) }),
       jsx(QcTargetCard, { workbench }),
       jsx(QcReadinessCard, { workbench, profileId: provider.profileId, provider }),
@@ -1864,12 +2198,13 @@ function QcPane() {
   const targetPanel = workbench.browserPanels[targetPanelId] || DEFAULT_BROWSER_PANELS.result
   const hasResult = Boolean(targetPanel.url)
   const hasReference = Boolean(workbench.browserPanels.reference.url)
-  const hasCapture = workbench.capture?.panelId === targetPanelId && workbench.capture?.url === targetPanel.url
+  const hasCapture = workbench.capture?.panelId === targetPanelId && workbench.capture?.targetId === targetPanel.targetId
 
   return jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
     children: [
       jsx(PanelIntro, { title: profile.label, description: profile.description }),
+      jsx(AgentActivity, { activity: workbench.agentActivity }),
       jsx('div', { style: { padding: '0 12px 8px' }, children: jsx(ProfileSelect, { value: workbench.qcProfile }) }),
       jsx(QcTargetCard, { workbench }),
       jsx(QcReadinessCard, { workbench, profileId: workbench.qcProfile, provider }),
@@ -1880,7 +2215,7 @@ function QcPane() {
           jsx(Badge, { variant: passed ? 'default' : 'muted', children: `${passed} PASS` }),
           jsx('span', {
             style: { color: 'var(--ui-text-quaternary)', fontSize: 10, marginLeft: 'auto' },
-            children: hasCapture ? 'CAPTURE READY' : hasResult && hasReference ? 'TARGET + REFERENCE' : hasResult ? 'TARGET LINKED' : 'NO TARGET'
+            children: hasCapture ? 'CAPTURE READY' : hasResult && hasReference ? 'TARGET + REFERENCE' : reviewContextMatches(workbench, workbench.qcProfile) ? 'TARGET LINKED' : hasResult ? 'TARGET OPEN' : 'NO TARGET'
           })
         ]
       }),
@@ -1899,13 +2234,16 @@ export default {
   version: PLUGIN_VERSION,
   register(ctx) {
     pluginContext = ctx
+    const savedV6 = ctx.storage.get('workbench.v6', null)
     const savedV5 = ctx.storage.get('workbench.v5', null)
     const savedV4 = ctx.storage.get('workbench.v4', null)
     const savedV3 = ctx.storage.get('workbench.v3', null)
     const savedV2 = ctx.storage.get('workbench.v2', null)
     const savedV1 = ctx.storage.get('workbench.v1', DEFAULT_STATE)
-    state = restoredState(savedV5 || savedV4 || savedV3 || savedV2 || savedV1)
-    if (!savedV5) ctx.storage.set('workbench.v5', persistedState())
+    state = restoredState(savedV6 || savedV5 || savedV4 || savedV3 || savedV2 || savedV1)
+    ctx.storage.set('workbench.v6', persistedState())
+    const seenAgentCommandIds = new Set()
+    ctx.socket('/commands', received => { void dispatchAgentCommand(ctx, received, seenAgentCommandIds) })
 
     ctx.registerMany([
       {
@@ -1969,9 +2307,7 @@ export default {
               qcProfileHint: profileId,
               providerEvidence: providerEvidenceFor(input)
             })
-            setState({ qcProfile: profileId, qcTargetPanelId: 'result' })
-            host.panes?.setOpen?.(BROWSER_PANE_ID, true)
-            host.panes?.setOpen?.(QC_PANE_ID, true)
+            linkBrowserPanelToQc('result', input)
           }
         }
       },

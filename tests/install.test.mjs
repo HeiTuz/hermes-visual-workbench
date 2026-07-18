@@ -9,6 +9,8 @@ const root = resolve(import.meta.dirname, '..')
 const installer = join(root, 'scripts', 'install.mjs')
 const sourcePlugin = await readFile(join(root, 'plugin.js'), 'utf8')
 const sourceSkill = await readFile(join(root, 'skill', 'SKILL.md'), 'utf8')
+const sourceDashboardManifest = await readFile(join(root, 'dashboard', 'manifest.json'), 'utf8')
+const sourceDashboardApi = await readFile(join(root, 'dashboard', 'plugin_api.py'), 'utf8')
 
 function run(args) {
   const forwarded = [...args]
@@ -16,6 +18,7 @@ function run(args) {
   if (targetIndex >= 0 && !forwarded.includes('--skill-target')) {
     forwarded.push('--skill-target', join(forwarded[targetIndex + 1], 'skill'))
   }
+  if (targetIndex >= 0 && !forwarded.includes('--hermes-home')) forwarded.push('--hermes-home', forwarded[targetIndex + 1])
   return spawnSync(process.execPath, [installer, ...forwarded], { cwd: root, encoding: 'utf8' })
 }
 
@@ -23,26 +26,42 @@ async function workspace() {
   return mkdtemp(join(tmpdir(), 'hermes-visual-workbench-'))
 }
 
-test('installs, updates with backup, and uninstalls a managed plugin', async t => {
+test('installs, updates with backup, and uninstalls managed plugin, skill, and dashboard files', async t => {
   const target = await workspace()
+  const dashboardTarget = join(target, 'plugins', 'visual-workbench', 'dashboard')
   t.after(() => rm(target, { force: true, recursive: true }))
 
   const installed = run(['--target', target])
   assert.equal(installed.status, 0, installed.stderr)
+  assert.match(installed.stdout, /Run: hermes plugins enable visual-workbench \(backend restart required\)/)
   assert.equal(await readFile(join(target, 'plugin.js'), 'utf8'), sourcePlugin)
   assert.equal(await readFile(join(target, 'skill', 'SKILL.md'), 'utf8'), sourceSkill)
+  assert.equal(await readFile(join(dashboardTarget, 'manifest.json'), 'utf8'), sourceDashboardManifest)
+  assert.equal(await readFile(join(dashboardTarget, 'plugin_api.py'), 'utf8'), sourceDashboardApi)
+  const marker = JSON.parse(await readFile(join(target, '.hermes-visual-workbench-install.json'), 'utf8'))
+  assert.deepEqual(marker.files.map(file => file.id), ['plugin', 'skill', 'dashboard-manifest', 'dashboard-api'])
 
   await writeFile(join(target, 'plugin.js'), '// locally modified\n')
+  await writeFile(join(dashboardTarget, 'plugin_api.py'), '# locally modified\n')
+  await writeFile(join(dashboardTarget, 'manifest.json'), '{"locally":"modified"}\n')
   const updated = run(['--target', target])
   assert.equal(updated.status, 0, updated.stderr)
   assert.match(updated.stdout, /Backed up existing plugin/)
+  assert.match(updated.stdout, /Backed up existing dashboard-api/)
+  assert.match(updated.stdout, /Backed up existing dashboard-manifest/)
   assert.equal(await readFile(join(target, 'plugin.js'), 'utf8'), sourcePlugin)
+  assert.equal(await readFile(join(dashboardTarget, 'plugin_api.py'), 'utf8'), sourceDashboardApi)
+  assert.equal(await readFile(join(dashboardTarget, 'manifest.json'), 'utf8'), sourceDashboardManifest)
   assert.equal((await readdir(join(target, 'backups', 'plugin'))).length, 1)
+  assert.equal((await readdir(join(target, 'backups', 'dashboard-api'))).length, 1)
+  assert.equal((await readdir(join(target, 'backups', 'dashboard-manifest'))).length, 1)
 
   const removed = run(['--target', target, '--uninstall'])
   assert.equal(removed.status, 0, removed.stderr)
   await assert.rejects(readFile(join(target, 'plugin.js')), /ENOENT/)
   await assert.rejects(readFile(join(target, 'skill', 'SKILL.md')), /ENOENT/)
+  await assert.rejects(readFile(join(dashboardTarget, 'manifest.json')), /ENOENT/)
+  await assert.rejects(readFile(join(dashboardTarget, 'plugin_api.py')), /ENOENT/)
 })
 
 test('accepts package-runner forwarded arguments after --', async t => {

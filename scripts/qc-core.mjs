@@ -1,4 +1,4 @@
-export const PERSISTED_SCHEMA_VERSION = 5
+export const PERSISTED_SCHEMA_VERSION = 6
 export const QC_DOCUMENT_SCHEMA_VERSION = 1
 export const MAX_QC_JSON_BYTES = 64 * 1024
 export const CANDIDATE_IDS = Object.freeze(['A', 'B', 'C', 'D'])
@@ -87,6 +87,32 @@ function parsedRecord(value) {
   }
 }
 
+function createId(prefix) {
+  return `${prefix}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6).padEnd(4, '0')}`
+}
+
+function validId(value, prefix) {
+  return typeof value === 'string' && value.length <= 64 && new RegExp(`^${prefix}[0-9a-z]+-[0-9a-z]{4,}$`).test(value)
+}
+
+function mediaKind(url) {
+  const path = String(url || '').split(/[?#]/, 1)[0].toLowerCase()
+  if (/\.(png|jpe?g|webp|gif|avif|bmp|svg)$/.test(path) || /^data:image\//i.test(url)) return 'image'
+  if (/\.(mp4|mov|webm|mkv|avi)$/.test(path)) return 'video'
+  return 'page'
+}
+
+function viewportFor(panel) {
+  const preset = {
+    desktop: [1440, 900], laptop: [1280, 800], tablet: [768, 1024], mobile: [390, 844]
+  }[panel.preset]
+  return {
+    preset: panel.preset,
+    width: Math.max(240, Number(preset?.[0] || panel.width) || 1440),
+    height: Math.max(240, Number(preset?.[1] || panel.height) || 900),
+    responsive: panel.preset === 'responsive'
+  }
+}
 function providerRecords(value, depth = 0, seen = new Set()) {
   if (depth > 4 || value === null || value === undefined) return []
   if (typeof value === 'string') {
@@ -99,7 +125,7 @@ function providerRecords(value, depth = 0, seen = new Set()) {
   const looksLikeGeneration = Boolean(
     value.id || value.jobId || value.job_id || value.model || value.params || value.status || value.type
   )
-  const nested = ['structuredContent', 'result', 'data', 'items', 'generations', 'jobs']
+  const nested = ['structuredContent', 'raw_data', 'result', 'data', 'items', 'generations', 'jobs']
     .flatMap(key => providerRecords(value[key], depth + 1, seen))
   return looksLikeGeneration ? [value, ...nested] : nested
 }
@@ -112,6 +138,7 @@ function resultUrls(record) {
   add(record.url)
   add(record.resultUrl)
   add(record.result_url)
+  add(record.min_result_url)
   const results = isRecord(record.results) ? record.results : {}
   add(results.rawUrl)
   add(results.minUrl)
@@ -136,6 +163,7 @@ export function restoredProviderEvidence(value) {
     jobId: boundedMetadataString(value.jobId, 128),
     status: boundedMetadataString(value.status, 64),
     model: boundedMetadataString(value.model, 128),
+    soulId: boundedMetadataString(value.soulId, 128),
     mediaType: ['image', 'video', 'audio', '3d'].includes(value.mediaType) ? value.mediaType : '',
     prompt: boundedMetadataString(value.prompt),
     width,
@@ -149,6 +177,9 @@ export function restoredProviderEvidence(value) {
     createdAt: typeof value.createdAt === 'string' || Number.isFinite(value.createdAt) ? value.createdAt : '',
     checkedAt: boundedMetadataString(value.checkedAt, 64)
   }
+}
+export function providerEvidenceIdentity(evidence) {
+  return evidence ? `${evidence.jobId}|${evidence.resultUrl}|${evidence.model}` : ''
 }
 
 export function providerEvidenceFor(input = {}) {
@@ -169,7 +200,8 @@ export function providerEvidenceFor(input = {}) {
     source: 'higgsfield-mcp',
     jobId: record.id || record.jobId || record.job_id || '',
     status: record.status || '',
-    model: record.model || params.model || '',
+    model: record.model || record.job_set_type || params.model || '',
+    soulId: params.custom_reference_id || '',
     mediaType,
     prompt: params.prompt || record.prompt || '',
     width: params.width || record.width || 0,
@@ -194,19 +226,136 @@ function restoredInspection(value) {
   }
 }
 
-function restoredReviewContext(value) {
+function restoredReviewContext(value, panels, allowLegacy = false) {
   if (!isRecord(value) || !QC_PROFILE_IDS.includes(value.profileId) || !['result', 'reference'].includes(value.panelId)) return null
+  const panel = panels[value.panelId]
+  const legacy = !Object.hasOwn(value, 'contextId')
+  if (legacy) {
+    const url = boundedMetadataString(value.url, 4096)
+    if (!allowLegacy || !url || !panel?.url || url !== panel.url) return null
+    return {
+      contextId: createId('c'), panelId: value.panelId, targetId: panel.targetId, profileId: value.profileId,
+      url, mediaKind: mediaKind(url), viewport: viewportFor(panel),
+      providerEvidence: restoredProviderEvidence(panel.providerEvidence), linkedAt: new Date().toISOString(), stale: false, staleReason: ''
+    }
+  }
+  if (!validId(value.contextId, 'c') || !validId(value.targetId, 't') || (!value.stale && !panel?.url) ||
+      !QC_PROFILE_IDS.includes(value.profileId) || !['image', 'video', 'page'].includes(value.mediaKind) ||
+      !isRecord(value.viewport) || typeof value.stale !== 'boolean' ||
+      !['', 'url-changed', 'viewport-changed', 'panels-swapped', 'provenance-changed', 'load-failed'].includes(value.staleReason) ||
+      typeof value.linkedAt !== 'string' || value.linkedAt.length > 64) return null
   const url = boundedMetadataString(value.url, 4096)
-  return url ? { profileId: value.profileId, panelId: value.panelId, url } : null
+  const viewport = value.viewport
+  if (!url || !Number.isFinite(viewport.width) || viewport.width < 240 || !Number.isFinite(viewport.height) ||
+      viewport.height < 240 || typeof viewport.preset !== 'string' || typeof viewport.responsive !== 'boolean') return null
+  const providerEvidence = restoredProviderEvidence(value.providerEvidence)
+  if (!value.stale && (value.targetId !== panel.targetId || url !== panel.url || value.mediaKind !== mediaKind(panel.url) ||
+      providerEvidenceIdentity(providerEvidence) !== providerEvidenceIdentity(panel.providerEvidence) ||
+      (value.mediaKind === 'page' && JSON.stringify({
+        preset: viewport.preset, width: Math.round(viewport.width), height: Math.round(viewport.height), responsive: viewport.responsive
+      }) !== JSON.stringify(viewportFor(panel))))) return null
+  return {
+    contextId: value.contextId, panelId: value.panelId, targetId: value.targetId, profileId: value.profileId,
+    url, mediaKind: value.mediaKind,
+    viewport: { preset: viewport.preset, width: Math.round(viewport.width), height: Math.round(viewport.height), responsive: viewport.responsive },
+    providerEvidence, linkedAt: value.linkedAt,
+    stale: value.stale, staleReason: value.staleReason
+  }
 }
 
 export function reviewContextMatches(current, profileId) {
   const panelId = current.qcTargetPanelId || 'result'
   const panel = current.browserPanels[panelId]
-  return Boolean(
-    panel?.url && current.reviewContext?.profileId === profileId && current.reviewContext?.panelId === panelId &&
-    current.reviewContext?.url === panel.url
-  )
+  const context = current.reviewContext
+  return Boolean(panel?.url && context && !context.stale && context.profileId === profileId &&
+    context.panelId === panelId && context.targetId === panel.targetId)
+}
+
+export function panelLinkedToQc(current, panelId) {
+  const panel = current.browserPanels[panelId]
+  const context = current.reviewContext
+  return Boolean(panel?.url && context && !context.stale && current.qcTargetPanelId === panelId &&
+    context.panelId === panelId && context.targetId === panel.targetId && context.profileId === current.qcProfile)
+}
+export function updatePanelState(state, panelId, patch, options = {}, makeId = createId) {
+  const panel = state.browserPanels[panelId]
+  if (!panel) return state
+  const { preserveQcProfileHint = false, preserveProviderEvidence = false } = options
+  const urlChanged = Object.hasOwn(patch, 'url') && patch.url !== panel.url
+  const nextUrl = Object.hasOwn(patch, 'url') ? patch.url : panel.url
+  const viewportChanged = ['preset', 'width', 'height'].some(key => Object.hasOwn(patch, key) && patch[key] !== panel[key])
+  const provenanceChanged = Object.hasOwn(patch, 'providerEvidence') &&
+    providerEvidenceIdentity(patch.providerEvidence) !== providerEvidenceIdentity(panel.providerEvidence)
+  const targetChanged = urlChanged || (viewportChanged && mediaKind(nextUrl) === 'page') || provenanceChanged
+  const staleReason = urlChanged ? 'url-changed' : viewportChanged ? 'viewport-changed' : 'provenance-changed'
+  const nextPanel = {
+    ...panel, ...patch,
+    ...(targetChanged ? { targetId: makeId('t'), inspection: null } : {}),
+    ...(urlChanged && !preserveQcProfileHint && !Object.hasOwn(patch, 'qcProfileHint') ? { qcProfileHint: '' } : {}),
+    ...(urlChanged && !preserveProviderEvidence && !Object.hasOwn(patch, 'providerEvidence') ? { providerEvidence: null } : {})
+  }
+  const context = state.reviewContext
+  const reviewContext = targetChanged && context?.panelId === panelId && context.targetId === panel.targetId
+    ? { ...context, stale: true, staleReason }
+    : context
+  return {
+    ...state,
+    browserPanels: { ...state.browserPanels, [panelId]: nextPanel },
+    reviewContext,
+    ...(targetChanged && state.capture?.panelId === panelId ? { capture: null } : {})
+  }
+}
+
+export function linkPanelState(state, panelId, input = {}, makeId = createId) {
+  const panel = state.browserPanels[panelId]
+  if (!panel?.url) return state
+  const profileId = QC_PROFILE_IDS.includes(input.profileId)
+    ? input.profileId
+    : QC_PROFILE_IDS.includes(panel.qcProfileHint) ? panel.qcProfileHint : 'design'
+  const previous = state.reviewContext
+  const same = previous && !previous.stale && previous.panelId === panelId &&
+    previous.targetId === panel.targetId && previous.profileId === profileId
+  const reviewContext = same ? previous : {
+    contextId: input.contextId || makeId('c'), panelId, targetId: panel.targetId, profileId, url: panel.url,
+    mediaKind: mediaKind(panel.url), viewport: viewportFor(panel),
+    providerEvidence: restoredProviderEvidence(panel.providerEvidence), linkedAt: input.linkedAt || new Date().toISOString(),
+    stale: false, staleReason: ''
+  }
+  return {
+    ...state,
+    browserSplit: panelId === 'reference' ? true : state.browserSplit,
+    qcProfile: profileId, qcTargetPanelId: panelId, reviewContext,
+    ...(same ? {} : {
+      evaluations: {}, job: blankJob(), candidates: blankCandidates(), selectedCandidate: null, qcJson: '',
+      ...(state.capture?.targetId !== panel.targetId ? { capture: null } : {})
+    })
+  }
+}
+
+export function swapPanelsState(state, makeId = createId) {
+  const result = state.browserPanels.result
+  const reference = state.browserPanels.reference
+  if (!result || !reference) return state
+  const context = state.reviewContext
+  return {
+    ...state,
+    browserPanels: {
+      ...state.browserPanels,
+      result: { ...reference, targetId: makeId('t'), inspection: null },
+      reference: { ...result, targetId: makeId('t'), inspection: null }
+    },
+    reviewContext: context && !context.stale && ['result', 'reference'].includes(context.panelId)
+      ? { ...context, stale: true, staleReason: 'panels-swapped' }
+      : context,
+    capture: null
+  }
+}
+
+export function markPanelLoadFailedState(state, panelId) {
+  const panel = state.browserPanels[panelId]
+  const context = state.reviewContext
+  if (!panel || !context || context.stale || context.panelId !== panelId || context.targetId !== panel.targetId) return state
+  return { ...state, reviewContext: { ...context, stale: true, staleReason: 'load-failed' } }
 }
 
 function restoredDimension(value) {
@@ -248,6 +397,7 @@ function restoredPanel(value, defaults, legacyUrl = '') {
   const source = isRecord(value) ? value : {}
   return {
     url: typeof source.url === 'string' ? source.url : legacyUrl,
+    targetId: validId(source.targetId, 't') ? source.targetId : createId('t'),
     preset: typeof source.preset === 'string' ? source.preset : defaults.preset,
     width: Number.isFinite(source.width) && source.width >= 240 ? source.width : defaults.width,
     height: Number.isFinite(source.height) && source.height >= 240 ? source.height : defaults.height,
@@ -274,16 +424,14 @@ function restoredEvaluations(value) {
 }
 
 function restoredCapture(value) {
-  if (!isRecord(value) || !['result', 'reference'].includes(value.panelId)) return null
+  if (!isRecord(value) || !['result', 'reference'].includes(value.panelId) || !validId(value.targetId, 't')) return null
   if (!Number.isInteger(value.width) || value.width <= 0 || !Number.isInteger(value.height) || value.height <= 0) return null
   if (typeof value.path !== 'string' || !value.path) return null
   return {
-    panelId: value.panelId,
-    url: typeof value.url === 'string' ? value.url : '',
-    width: value.width,
-    height: value.height,
+    panelId: value.panelId, targetId: value.targetId, url: typeof value.url === 'string' ? value.url : '',
+    width: value.width, height: value.height,
     createdAt: Number.isFinite(value.createdAt) ? value.createdAt : typeof value.createdAt === 'string' ? value.createdAt : '',
-    path: typeof value.path === 'string' ? value.path : ''
+    path: value.path
   }
 }
 
@@ -407,16 +555,18 @@ export function migratePersistedState(saved, defaults) {
   const source = isRecord(saved) ? saved : {}
   const legacyUrl = typeof source.browserUrl === 'string' ? source.browserUrl : ''
   const candidates = isRecord(source.candidates) ? source.candidates : {}
-  return {
+  const browserPanels = {
+    result: restoredPanel(source.browserPanels?.result, defaults.browserPanels.result, legacyUrl),
+    reference: restoredPanel(source.browserPanels?.reference, defaults.browserPanels.reference)
+  }
+  const reviewContext = restoredReviewContext(source.reviewContext, browserPanels, source.schemaVersion !== PERSISTED_SCHEMA_VERSION)
+  const restored = {
     ...defaults,
     schemaVersion: PERSISTED_SCHEMA_VERSION,
     browserSplit: source.browserSplit === true,
-    browserPanels: {
-      result: restoredPanel(source.browserPanels?.result, defaults.browserPanels.result, legacyUrl),
-      reference: restoredPanel(source.browserPanels?.reference, defaults.browserPanels.reference)
-    },
+    browserPanels,
     qcTargetPanelId: ['result', 'reference'].includes(source.qcTargetPanelId) ? source.qcTargetPanelId : 'result',
-    reviewContext: restoredReviewContext(source.reviewContext),
+    reviewContext,
     qcProfile: QC_PROFILE_IDS.includes(source.qcProfile) ? source.qcProfile : defaults.qcProfile,
     evaluations: restoredEvaluations(source.evaluations),
     job: restoredJob(source.job),
@@ -425,11 +575,29 @@ export function migratePersistedState(saved, defaults) {
     qcJson: typeof source.qcJson === 'string' ? source.qcJson : '',
     capture: restoredCapture(source.capture)
   }
+  if (!restored.capture && source.schemaVersion !== PERSISTED_SCHEMA_VERSION && isRecord(source.capture)) {
+    const panel = browserPanels[source.capture.panelId]
+    if (panel && source.capture.url === panel.url) {
+      restored.capture = restoredCapture({ ...source.capture, targetId: panel.targetId })
+    }
+  }
+  if (restored.capture) {
+    const panel = browserPanels[restored.capture.panelId]
+    if (!panel || restored.capture.targetId !== panel.targetId || restored.capture.url !== panel.url) restored.capture = null
+  }
+  if (!reviewContext && source.reviewContext) {
+    restored.evaluations = {}
+    restored.job = blankJob()
+    restored.candidates = blankCandidates()
+    restored.selectedCandidate = null
+    restored.qcJson = ''
+  }
+  return restored
 }
 
 // Provider descriptor registry. Midjourney is the first adapter: its QC wire
 // format is the frozen schema-v1 document contract (`validateQcDocument`).
-// Descriptor dimensions MUST be drawn from the persisted schema-v5 candidate
+// Descriptor dimensions MUST be drawn from the persisted schema-v6 candidate
 // dimension vocabulary (`QC_DIMENSIONS`) so structured review state stays
 // storable without a persisted-schema bump; `assertProviderRegistry` enforces
 // this at module init.
@@ -504,7 +672,7 @@ function assertProviderRegistry() {
     if (!QC_PROFILE_IDS.includes(provider.profileId)) throw new Error(`Provider ${providerId}: profileId must be a known QC profile`)
     if (provider.candidateIds !== CANDIDATE_IDS) throw new Error(`Provider ${providerId}: candidateIds must reuse the shared candidate vocabulary`)
     for (const key of provider.dimensions) {
-      if (!QC_DIMENSIONS.includes(key)) throw new Error(`Provider ${providerId}: dimension ${key} is not storable in persisted schema v2`)
+      if (!QC_DIMENSIONS.includes(key)) throw new Error(`Provider ${providerId}: dimension ${key} is not storable in persisted schema v6`)
       if (typeof provider.dimensionLabels[key] !== 'string' || !provider.dimensionLabels[key]) {
         throw new Error(`Provider ${providerId}: dimension ${key} must have a label`)
       }
@@ -534,4 +702,127 @@ export function qcProfileFor(input = {}) {
   if (wireProvider) return wireProvider.profileId
   if (/\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) || toolName.includes('generate_video')) return 'higgsfield-video'
   return matches.length ? matches[0].profileId : 'design'
+}
+const AGENT_COMMAND_OPS = ['status', 'set-target', 'link', 'capture', 'inspect', 'page-checks', 'set-check', 'score-candidate', 'select-candidate', 'import-qc']
+const AGENT_PANEL_IDS = ['result', 'reference']
+const AGENT_CHECK_STATUSES = ['pass', 'fail', 'na', 'pending']
+
+function agentCommandError(message) {
+  return { ok: false, error: message }
+}
+
+function hasOnlyKeys(value, keys) {
+  return Object.keys(value).every(key => keys.includes(key))
+}
+
+function validAgentString(value, max) {
+  return typeof value === 'string' && value.length <= max
+}
+
+export function validateAgentCommand(value) {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['id', 'op', 'panelId', 'payload'])) return agentCommandError('Command must be an object with only id, op, panelId, and payload')
+  if (!validAgentString(value.id, 64) || !value.id) return agentCommandError('id must be a non-empty string of at most 64 characters')
+  if (!AGENT_COMMAND_OPS.includes(value.op)) return agentCommandError('op is unknown')
+  if (!isRecord(value.payload)) return agentCommandError('payload must be an object')
+
+  const needsPanel = ['set-target', 'link', 'capture', 'inspect', 'page-checks'].includes(value.op)
+  if (needsPanel ? !AGENT_PANEL_IDS.includes(value.panelId) : Object.hasOwn(value, 'panelId')) {
+    return agentCommandError(needsPanel ? 'panelId must be result or reference' : 'panelId is not allowed for this op')
+  }
+
+  const payload = value.payload
+  if (value.op === 'status' && hasOnlyKeys(payload, [])) return { ok: true, command: value }
+  if (value.op === 'set-target' && hasOnlyKeys(payload, ['url', 'preset', 'width', 'height']) &&
+      validAgentString(payload.url, 4096) && /^(https?|file|data):/i.test(payload.url) &&
+      (!Object.hasOwn(payload, 'preset') || validAgentString(payload.preset, 64)) &&
+      (!Object.hasOwn(payload, 'width') || Number.isInteger(payload.width) && payload.width >= 240) &&
+      (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240)) return { ok: true, command: value }
+  if (value.op === 'link' && hasOnlyKeys(payload, ['profileId']) &&
+      (!Object.hasOwn(payload, 'profileId') || QC_PROFILE_IDS.includes(payload.profileId))) return { ok: true, command: value }
+  if (['capture', 'inspect', 'page-checks'].includes(value.op) && hasOnlyKeys(payload, [])) return { ok: true, command: value }
+  if (value.op === 'set-check' && hasOnlyKeys(payload, ['profileId', 'checkId', 'status', 'note']) &&
+      QC_PROFILE_IDS.includes(payload.profileId) && validAgentString(payload.checkId, 64) && payload.checkId &&
+      AGENT_CHECK_STATUSES.includes(payload.status) &&
+      (!Object.hasOwn(payload, 'note') || validAgentString(payload.note, 2000))) return { ok: true, command: value }
+  if (value.op === 'score-candidate' && hasOnlyKeys(payload, ['candidateId', 'summary', 'score', 'disposition', 'repairPrompt', 'dimensions']) &&
+      CANDIDATE_IDS.includes(payload.candidateId) &&
+      (!Object.hasOwn(payload, 'summary') || validAgentString(payload.summary, 2000)) &&
+      (!Object.hasOwn(payload, 'score') || Number.isInteger(payload.score) && payload.score >= 0 && payload.score <= 100) &&
+      (!Object.hasOwn(payload, 'disposition') || DISPOSITIONS.includes(payload.disposition)) &&
+      (!Object.hasOwn(payload, 'repairPrompt') || validAgentString(payload.repairPrompt, 4000)) &&
+      (!Object.hasOwn(payload, 'dimensions') || isRecord(payload.dimensions) && Object.entries(payload.dimensions).every(([key, dimension]) =>
+        QC_DIMENSIONS.includes(key) && isRecord(dimension) && hasOnlyKeys(dimension, ['score', 'evidence']) &&
+        Number.isInteger(dimension.score) && dimension.score >= 0 && dimension.score <= 100 &&
+        validAgentString(dimension.evidence, 2000)))) return { ok: true, command: value }
+  if (value.op === 'select-candidate' && hasOnlyKeys(payload, ['candidateId']) && CANDIDATE_IDS.includes(payload.candidateId)) return { ok: true, command: value }
+  if (value.op === 'import-qc' && hasOnlyKeys(payload, ['json']) && validAgentString(payload.json, MAX_QC_JSON_BYTES)) return { ok: true, command: value }
+  return agentCommandError(`Invalid payload for ${value.op}`)
+}
+
+function agentCandidateReviewed(candidate) {
+  return Boolean(candidate?.summary || candidate?.evidence?.length || candidate?.repairPrompt || candidate?.score > 0 ||
+    Object.values(candidate?.dimensions || {}).some(dimension => dimension?.score > 0 || dimension?.evidence))
+}
+
+export function agentStatusSnapshot(state) {
+  const context = state.reviewContext
+  return {
+    qcProfile: state.qcProfile,
+    qcTargetPanelId: state.qcTargetPanelId,
+    reviewContext: context ? {
+      contextId: context.contextId, panelId: context.panelId, targetId: context.targetId, profileId: context.profileId,
+      url: context.url, mediaKind: context.mediaKind, stale: context.stale, staleReason: context.staleReason,
+      providerJobId: context.providerEvidence?.jobId || ''
+    } : null,
+    panels: Object.fromEntries(AGENT_PANEL_IDS.map(panelId => {
+      const panel = state.browserPanels[panelId] || {}
+      return [panelId, { url: panel.url || '', targetId: panel.targetId || '', mediaKind: mediaKind(panel.url) }]
+    })),
+    capture: state.capture ? {
+      panelId: state.capture.panelId, targetId: state.capture.targetId, width: state.capture.width, height: state.capture.height, path: state.capture.path
+    } : null,
+    evaluations: Object.fromEntries(Object.entries(state.evaluations || {}).map(([profileId, checks]) => [
+      profileId, Object.fromEntries(Object.entries(checks || {}).map(([checkId, evaluation]) => [checkId, { status: evaluation.status }]))
+    ])),
+    candidates: Object.fromEntries(CANDIDATE_IDS.map(id => {
+      const candidate = state.candidates?.[id] || blankCandidate(id)
+      return [id, { score: candidate.score, disposition: candidate.disposition, reviewed: agentCandidateReviewed(candidate) }]
+    })),
+    selectedCandidate: state.selectedCandidate,
+    jobState: state.job?.state || 'DRAFT'
+  }
+}
+
+export function applyAgentCommand(state, command, makeId = createId) {
+  const guardError = 'Link the target in the Browser pane before editing QC'
+  const { op, payload } = command
+  if (op === 'status') return { state, summary: 'Status snapshot' }
+  if (op === 'set-target') {
+    const patch = Object.fromEntries(Object.entries(payload).filter(([key]) => ['url', 'preset', 'width', 'height'].includes(key)))
+    return { state: updatePanelState(state, command.panelId, patch, {}, makeId), summary: `Set ${command.panelId} target` }
+  }
+  if (op === 'link') {
+    const panel = state.browserPanels[command.panelId]
+    const profileId = payload.profileId || (QC_PROFILE_IDS.includes(panel?.qcProfileHint) ? panel.qcProfileHint : qcProfileFor({ src: panel?.url }))
+    if (!panel?.url) return { error: `Open a ${command.panelId} target before linking it to Quality Control` }
+    return { state: linkPanelState(state, command.panelId, { profileId }, makeId), summary: `Linked ${command.panelId} to ${profileId}` }
+  }
+  if (op === 'set-check') {
+    if (!reviewContextMatches(state, payload.profileId)) return { error: guardError }
+    const profile = { ...(state.evaluations[payload.profileId] || {}) }
+    profile[payload.checkId] = { ...profile[payload.checkId], status: payload.status, ...(Object.hasOwn(payload, 'note') ? { note: payload.note } : {}) }
+    return { state: { ...state, evaluations: { ...state.evaluations, [payload.profileId]: profile } }, summary: `Set ${payload.checkId} to ${payload.status}` }
+  }
+  if (op === 'score-candidate') {
+    if (!reviewContextMatches(state, state.qcProfile)) return { error: guardError }
+    const candidate = state.candidates[payload.candidateId]
+    const patch = Object.fromEntries(Object.entries(payload).filter(([key]) => ['summary', 'score', 'disposition', 'repairPrompt'].includes(key)))
+    if (payload.dimensions) patch.dimensions = { ...candidate.dimensions, ...payload.dimensions }
+    return { state: { ...state, candidates: { ...state.candidates, [payload.candidateId]: { ...candidate, ...patch } } }, summary: `Scored candidate ${payload.candidateId}` }
+  }
+  if (op === 'select-candidate') {
+    if (!reviewContextMatches(state, state.qcProfile)) return { error: guardError }
+    return { state: { ...state, selectedCandidate: payload.candidateId }, summary: `Selected candidate ${payload.candidateId}` }
+  }
+  return { error: `${op} is not a pure agent command` }
 }

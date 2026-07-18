@@ -1,7 +1,7 @@
 ---
 name: midjourney-visual-workbench
 description: Prepare, capture, QC, select, and optionally upscale Midjourney results in Hermes Desktop without touching cookies or spending credits without current-turn approval.
-version: 0.5.1
+version: 0.6.0
 platforms: [macos]
 metadata:
   hermes:
@@ -60,7 +60,34 @@ Top-level fields are exactly: `schemaVersion`, `job`, `selectedCandidate`, `cand
 - `disposition` is `PASS|REPAIR|REJECT`; scores are integers 0–100.
 - Dimension keys are exactly `promptFidelity`, `composition`, `identityReferenceFidelity`, `anatomyGeometry`, `artifacts`, `typography`, `colorMaterialFidelity`, `productionReadiness`; each value is `{ "score": integer, "evidence": string }`.
 - Input over 64 KiB, malformed JSON, unknown fields, missing fields, and invalid ranges must be rejected. Never replace prior good state after an import error.
+## Agent-driven QC
 
+Use the dashboard session token; do not embed or log it. From a shell inside the Hermes backend (e.g. the desktop-spawned agent), resolve the endpoint and token, submit a v1 command, then poll its result:
+
+```sh
+TOKEN="$HERMES_DASHBOARD_SESSION_TOKEN"   # injected into the backend env by Hermes Desktop
+BPID=$(for p in $(pgrep -f 'hermes_cli.main serve'); do ps eww $p | grep -q "$TOKEN" && echo $p && break; done)
+PORT=$(lsof -nP -a -p "$BPID" -iTCP -sTCP:LISTEN | awk 'NR==2{sub(".*:","",$9); print $9}')
+BASE="http://127.0.0.1:$PORT/api/plugins/visual-workbench"
+curl -sS -X POST "$BASE/command" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+  --data '{"id":"qc-1","op":"status","payload":{}}'
+curl -sS "$BASE/result/qc-1" -H "Authorization: Bearer $TOKEN"
+```
+
+If `TOKEN` is empty or `POST /command` fails, Hermes Desktop is not running: skip mirroring and continue with tool-based QC only.
+
+Poll `GET /result/<id>` until it returns `200` rather than `{ "pending": true }`. Each acknowledgement contains `ok`, `error`, `summary`, and the current status snapshot.
+
+- Design sequence: `set-target` → `link` → `page-checks` → `set-check` for the review rows.
+- Higgsfield sequence: `set-target` → `link` → `capture` → `score-candidate` → `select-candidate`.
+- Commands that edit QC reject an unlinked or `STALE` review context. Relink the current Browser-pane target after navigation, viewport changes, swaps, provenance changes, or load failure, then retry the rejected command.
+
+### Command-envelope and live-backend pitfalls
+
+- `panelId` is operation-specific, not a universal envelope field. Include it for panel-scoped operations such as `link`; omit it for global `status`. A `status` command carrying `panelId` is rejected with `panelId is not allowed for this op`.
+- Prefer the injected `$HERMES_DASHBOARD_SESSION_TOKEN`. If the agent shell does not inherit it but Desktop is live, identify the `hermes_cli.main serve` PID, read that process environment without printing the token, and derive its listening port with `lsof`. Treat this as endpoint discovery; never log or persist the token.
+- After `link`, verify with `status`; if the acknowledgement wrapper does not expose `reviewContext` where expected, read `GET /state` with the same bearer token rather than guessing the schema. Summarize `panelId`, `targetId`, `profileId`, `mediaKind`, `stale/staleReason`, and `providerJobId`. An empty `providerJobId` is a real provenance gap and must be reported, not inferred from the URL.
 ## Non-billable verification
 
 Use an existing feed screenshot or the package fixture. A valid dry run is: create artifact directory → write request/provenance → copy capture → validate/write QC JSON → import it through the real pane → show the recommendation. Explicitly record `billableActionsExecuted: []`.

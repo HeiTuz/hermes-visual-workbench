@@ -13,6 +13,8 @@ import {
   PROVIDER_IDS,
   PROVIDERS,
   providerEvidenceFor,
+  sanitizeUrl,
+  invokeHiggsfieldReadOnly,
   providerForProfile,
   QC_DIMENSIONS,
   qcDocumentFromState,
@@ -20,6 +22,8 @@ import {
   qcProfileFor,
   reviewContextMatches,
   restoredProviderEvidence,
+  sameMidjourneyCandidateSwitch,
+  midjourneyProviderEvidenceForUrl,
   transitionJob,
   linkPanelState,
   markPanelLoadFailedState,
@@ -253,8 +257,8 @@ test('routes Midjourney URLs and tool provenance to the matching QC profile', ()
   assert.equal(qcProfileFor({ src: 'https://example.test/page' }), 'design')
 })
 
-test('extracts bounded Higgsfield MCP metadata for the exact displayed result', () => {
-  const src = 'https://cdn.example.test/result.png?token=display'
+test('binds Higgsfield metadata only to one exact raw receipt and redacts URL secrets', () => {
+  const src = 'https://cdn.example.test/result.png?token=display&keep=ok'
   const evidence = providerEvidenceFor({
     src,
     toolName: 'mcp__higgsfield__show_generations',
@@ -266,7 +270,7 @@ test('extracts bounded Higgsfield MCP metadata for the exact displayed result', 
             aspect_ratio: '3:4', batch_size: 2, height: 1168, medias: [{ role: 'image' }],
             prompt: 'Product fidelity prompt', resolution: '1k', width: 880
           },
-          results: { rawUrl: 'https://cdn.example.test/result.png?token=raw' },
+          results: { rawUrl: src },
           createdAt: 123
         }]
       }
@@ -283,8 +287,40 @@ test('extracts bounded Higgsfield MCP metadata for the exact displayed result', 
   assert.equal(evidence.aspectRatio, '3:4')
   assert.equal(evidence.count, 2)
   assert.equal(evidence.referenceCount, 1)
-  assert.equal(evidence.resultUrl, 'https://cdn.example.test/result.png?token=raw')
+  assert.equal(evidence.resultUrl, 'https://cdn.example.test/result.png?keep=ok')
   assert.ok(evidence.checkedAt)
+
+  const collision = {
+    src,
+    toolName: 'mcp__higgsfield__show_generations',
+    toolResult: { structuredContent: { items: [
+      { id: 'one', results: { rawUrl: 'https://cdn.example.test/result.png?token=other' } },
+      { id: 'two', results: { rawUrl: 'https://cdn.example.test/result.png?sig=other' } }
+    ] } }
+  }
+  assert.equal(providerEvidenceFor(collision), null)
+  collision.toolResult.structuredContent.items.push({ id: 'exact', results: { rawUrl: src } })
+  assert.equal(providerEvidenceFor(collision).jobId, 'exact')
+  collision.toolResult.structuredContent.items.push({ id: 'duplicate', results: { rawUrl: src } })
+  assert.equal(providerEvidenceFor(collision), null)
+  assert.equal(sanitizeUrl('https://cdn.example.test/a?token=x&sig=y&signature=z&expires=1&key=k&auth=a&keep=yes#secret'), 'https://cdn.example.test/a?keep=yes')
+  assert.equal(
+    sanitizeUrl('https://user:password@cdn.example.test/a?apiKey=x&accessToken=y&keep=yes#fragment'),
+    'https://cdn.example.test/a?keep=yes'
+  )
+  assert.equal(sanitizeUrl('https://[malformed'), '')
+  assert.equal(sanitizeUrl('not a URL'), '')
+  assert.equal(sanitizeUrl('javascript:alert(1)'), '')
+})
+
+test('Higgsfield invocation firewall allows inspections only and blocks mutations before invocation', async () => {
+  const calls = []
+  const invoke = async name => { calls.push(name); return { ok: true } }
+  await invokeHiggsfieldReadOnly('mcp__higgsfield__show_generations', invoke)
+  await invokeHiggsfieldReadOnly('mcp__higgsfield__job_status', invoke)
+  await assert.rejects(invokeHiggsfieldReadOnly('mcp__higgsfield__generate_image', invoke), /read-only/)
+  await assert.rejects(invokeHiggsfieldReadOnly('mcp__higgsfield__upscale', invoke), /read-only/)
+  assert.deepEqual(calls, ['mcp__higgsfield__show_generations', 'mcp__higgsfield__job_status'])
 })
 
 test('extracts Soul V2 metadata from the Higgsfield job_status raw_data envelope', () => {
@@ -375,7 +411,7 @@ test('accepts exactly 64 KiB of JSON and rejects one byte more', () => {
 })
 
 test('exposes a provider registry with midjourney as the schema-v1 adapter', () => {
-  assert.deepEqual([...PROVIDER_IDS], ['midjourney', 'higgsfield-image'])
+  assert.deepEqual([...PROVIDER_IDS], ['midjourney', 'higgsfield-image', 'higgsfield-web'])
 
   const midjourney = providerForProfile('midjourney')
   assert.equal(midjourney, PROVIDERS.midjourney)
@@ -490,7 +526,7 @@ function v6State() {
 }
 
 function resultCapture() {
-  return { panelId: 'result', targetId: 'tresult-0001', url: 'https://example.test/page', width: 800, height: 600, createdAt: NOW, path: '/tmp/x.png' }
+  return { panelId: 'result', targetId: 'tresult-0001', url: 'https://example.test/page', width: 800, height: 600, viewport: { preset: 'desktop', width: 1440, height: 900, responsive: false }, createdAt: NOW, path: '/tmp/x.png' }
 }
 
 test('link creates one atomic review context and resets review families', () => {
@@ -510,6 +546,47 @@ test('link creates one atomic review context and resets review families', () => 
   assert.deepEqual(linked.capture, resultCapture(), 'capture bound to the same target survives linking')
   assert.equal(reviewContextMatches(linked, 'design'), true)
   assert.equal(panelLinkedToQc(linked, 'result'), true)
+})
+
+test('Midjourney QC links infer only strict verified job URL provenance', () => {
+  const jobId = '123e4567-e89b-42d3-a456-426614174000'
+  const validUrls = [
+    `https://midjourney.com/jobs/${jobId}`,
+    `https://www.midjourney.com/jobs/${jobId}?index=3`
+  ]
+  for (const url of validUrls) {
+    const inferred = midjourneyProviderEvidenceForUrl(url)
+    assert.deepEqual(inferred, { source: 'midjourney', jobId, operationId: '', resultUrl: url })
+    const state = v6State()
+    state.browserPanels.result = { ...state.browserPanels.result, url, targetId: 'tmj-0000', providerEvidence: null }
+    const linked = linkPanelState(state, 'result', { profileId: 'midjourney', contextId: 'cmj-0000', linkedAt: NOW }, sequentialIds())
+    assert.deepEqual(linked.browserPanels.result.providerEvidence, inferred)
+    assert.deepEqual(linked.reviewContext.providerEvidence, inferred)
+  }
+
+  const invalidUrls = [
+    `http://midjourney.com/jobs/${jobId}`,
+    `https://evil.midjourney.com/jobs/${jobId}`,
+    `https://midjourney.com/jobs/${jobId}/`,
+    `https://midjourney.com/imagine/${jobId}`,
+    'https://midjourney.com/jobs/not-a-uuid',
+    `https://midjourney.com/jobs/${jobId}?index=4`,
+    `https://midjourney.com/jobs/${jobId}?index=0&extra=1`,
+    `https://midjourney.com/jobs/${jobId}?foo=bar`,
+    `https://midjourney.com/jobs/${jobId}#fragment`
+  ]
+  for (const url of invalidUrls) {
+    assert.equal(midjourneyProviderEvidenceForUrl(url), null, url)
+    const state = v6State()
+    state.browserPanels.result = {
+      ...state.browserPanels.result, url, targetId: 'tmj-invalid', providerEvidence: {
+        source: 'midjourney', jobId, operationId: 'transient', resultUrl: `https://midjourney.com/jobs/${jobId}`
+      }
+    }
+    const linked = linkPanelState(state, 'result', { profileId: 'midjourney', contextId: 'cmj-invalid', linkedAt: NOW }, sequentialIds())
+    assert.equal(linked.reviewContext.providerEvidence, null, url)
+    assert.equal(linked.browserPanels.result.providerEvidence, null, url)
+  }
 })
 
 test('URL change rotates target identity, clears evidence, and stales the context', () => {
@@ -674,6 +751,15 @@ test('restore rejects live contexts whose provenance identity differs from the p
   const dropped = migratePersistedState(substituted, defaults)
   assert.equal(dropped.reviewContext, null, 'live context provenance must match panel provenance')
   assert.deepEqual(dropped.evaluations, {})
+  for (const [field, value] of [['source', 'higgsfield-web'], ['status', 'failed'], ['aspectRatio', '9:16']]) {
+    const changed = structuredClone(linked)
+    changed.browserPanels.reference.providerEvidence[field] = value
+    assert.equal(
+      migratePersistedState(changed, defaults).reviewContext,
+      null,
+      `${field} substitution must stale restored provenance`
+    )
+  }
 
   const staleHistorical = structuredClone(substituted)
   staleHistorical.reviewContext.stale = true
@@ -688,7 +774,7 @@ test('failed loads explicitly stale the linked context without touching other st
   const failed = markPanelLoadFailedState(linked, 'result')
   assert.equal(failed.reviewContext.stale, true)
   assert.equal(failed.reviewContext.staleReason, 'load-failed')
-  assert.deepEqual(failed.capture, resultCapture(), 'already-verified evidence is preserved')
+  assert.equal(failed.capture, null, 'failed navigation clears target capture')
   assert.equal(failed.browserPanels.result.targetId, 'tresult-0001', 'target identity does not rotate on load failure')
   assert.equal(reviewContextMatches(failed, 'design'), false)
   assert.equal(panelLinkedToQc(failed, 'result'), false)
@@ -711,6 +797,12 @@ test('validates every agent command and rejects malformed command payloads', () 
     { id: 'capture', op: 'capture', panelId: 'result', payload: {} },
     { id: 'inspect', op: 'inspect', panelId: 'result', payload: {} },
     { id: 'checks', op: 'page-checks', panelId: 'result', payload: {} },
+    { id: 'mj-state', op: 'midjourney-control', panelId: 'result', payload: { action: 'state' } },
+    { id: 'mj-nav', op: 'midjourney-control', panelId: 'result', payload: { action: 'navigate', url: 'https://www.midjourney.com/' } },
+    { id: 'mj-draft', op: 'midjourney-control', panelId: 'result', payload: { action: 'draft', prompt: 'non-billable smoke', parameters: { ar: '3:4' } } },
+    { id: 'mj-download', op: 'midjourney-control', panelId: 'result', payload: { action: 'download', jobId: 'job_123', filename: 'result.webp' } },
+    { id: 'mj-select', op: 'midjourney-control', panelId: 'result', payload: { action: 'action', name: 'select', candidate: 'A', jobId: '123e4567-e89b-42d3-a456-426614174000' } },
+    { id: 'mj-submit', op: 'midjourney-control', panelId: 'result', payload: { action: 'submit', approved: true, idempotencyKey: 'abcdefgh', validateReceipt: 'mjv-receipt', batchFingerprint: 'a'.repeat(64) } },
     { id: 'check', op: 'set-check', payload: { profileId: 'design', checkId: 'contrast', status: 'pass' } },
     { id: 'score', op: 'score-candidate', payload: { candidateId: 'A', score: 90 } },
     { id: 'select', op: 'select-candidate', payload: { candidateId: 'A' } },
@@ -720,6 +812,41 @@ test('validates every agent command and rejects malformed command payloads', () 
   assert.equal(validateAgentCommand({ id: '', op: 'status', payload: {} }).ok, false)
   assert.equal(validateAgentCommand({ id: 'bad', op: 'unknown', payload: {} }).ok, false)
   assert.equal(validateAgentCommand({ id: 'bad', op: 'set-target', panelId: 'result', payload: { url: 'https://example.test', extra: true } }).ok, false)
+  assert.equal(validateAgentCommand({ id: 'bad-mj', op: 'midjourney-control', panelId: 'result', payload: { action: 'navigate', url: 'https://example.test' } }).ok, false)
+  assert.equal(validateAgentCommand({ id: 'bad-submit', op: 'midjourney-control', panelId: 'result', payload: { action: 'submit', approved: false, idempotencyKey: 'abcdefgh' } }).ok, false)
+  assert.equal(validateAgentCommand({ id: 'bad-download', op: 'midjourney-control', panelId: 'result', payload: { action: 'download', jobId: '../bad', filename: 'result.png' } }).ok, false)
+  assert.equal(validateAgentCommand({ id: 'bad-stale-validation', op: 'midjourney-control', panelId: 'result', payload: { action: 'submit', approved: true, idempotencyKey: 'abcdefgh' } }).ok, false)
+  assert.equal(validateAgentCommand({ id: 'missing-batch-identity', op: 'midjourney-control', panelId: 'result', payload: { action: 'submit', approved: true, idempotencyKey: 'abcdefgh', validateReceipt: 'mjv-receipt' } }).ok, false)
+  assert.equal(validateAgentCommand({ id: 'bad-billable-action', op: 'midjourney-control', panelId: 'result', payload: { action: 'action', name: 'upscale', jobId: '123e4567-e89b-42d3-a456-426614174000', idempotencyKey: 'abcdefgh' } }).ok, false)
+})
+test('Midjourney candidate freshness accepts only the linked base and index transitions', () => {
+  const jobId = '123e4567-e89b-42d3-a456-426614174000'
+  const base = `https://www.midjourney.com/jobs/${jobId}`
+  const first = `${base}?index=0`
+  const second = `${base}?index=3`
+  assert.equal(sameMidjourneyCandidateSwitch(base, first, jobId), true)
+  assert.equal(sameMidjourneyCandidateSwitch(first, second, jobId), true)
+  assert.equal(sameMidjourneyCandidateSwitch(first, first, jobId), false)
+  assert.equal(sameMidjourneyCandidateSwitch(base, base, jobId), false)
+  assert.equal(sameMidjourneyCandidateSwitch(first, `${base}?index=0&x=1`, jobId), false)
+  assert.equal(sameMidjourneyCandidateSwitch(first, `${base}?index=0&index=1`, jobId), false)
+  assert.equal(sameMidjourneyCandidateSwitch(first, `${base}?index=4`, jobId), false)
+  assert.equal(sameMidjourneyCandidateSwitch(first, 'https://www.midjourney.com/jobs/223e4567-e89b-42d3-a456-426614174000?index=1', jobId), false)
+})
+test('standalone Midjourney evidence and status retain strict job and capture provenance', () => {
+  const jobId = '123e4567-e89b-42d3-a456-426614174000'
+  const jobUrl = `https://www.midjourney.com/jobs/${jobId}`
+  const evidence = restoredProviderEvidence({ source: 'midjourney', jobId: jobId.toUpperCase(), operationId: 'op-1', resultUrl: jobUrl })
+  assert.deepEqual(evidence, { source: 'midjourney', jobId, operationId: 'op-1', resultUrl: jobUrl })
+  assert.equal(restoredProviderEvidence({ source: 'midjourney', jobId: 'not-a-uuid' }), null)
+  const state = { ...v6State(), capture: { ...resultCapture(), url: jobUrl } }
+  state.browserPanels.result = { ...state.browserPanels.result, url: jobUrl, providerEvidence: evidence }
+  const linked = linkPanelState(state, 'result', { profileId: 'midjourney', contextId: 'cmj-0001', linkedAt: NOW })
+  assert.deepEqual(linked.reviewContext.providerEvidence, { source: 'midjourney', jobId, operationId: '', resultUrl: jobUrl })
+  const status = agentStatusSnapshot(linked)
+  assert.equal(status.reviewContext.providerJobId, jobId)
+  assert.equal(status.capture.url, linked.capture.url)
+  assert.deepEqual(status.capture.viewport, linked.capture.viewport)
 })
 
 test('applies linked agent QC commands and emits the complete status snapshot contract', () => {
@@ -734,4 +861,21 @@ test('applies linked agent QC commands and emits the complete status snapshot co
   assert.deepEqual(Object.keys(agentStatusSnapshot(scored.state)).sort(), ['candidates', 'capture', 'evaluations', 'jobState', 'panels', 'qcProfile', 'qcTargetPanelId', 'reviewContext', 'selectedCandidate'].sort())
   assert.deepEqual(Object.keys(agentStatusSnapshot(scored.state).reviewContext).sort(), ['contextId', 'mediaKind', 'panelId', 'profileId', 'providerJobId', 'stale', 'staleReason', 'targetId', 'url'].sort())
   assert.deepEqual(Object.keys(agentStatusSnapshot(scored.state).panels).sort(), ['reference', 'result'])
+})
+
+test('set-target rejects caller-asserted Higgsfield provenance', () => {
+  const url = 'https://cdn.higgsfield.test/generations/job.png'
+  const providerEvidence = {
+    source: 'higgsfield-mcp', jobId: 'cli-job-1', status: 'completed', model: 'text2image_soul_v2',
+    soulId: 'soul-9', mediaType: 'image', prompt: 'a portrait', width: 1152, height: 2048,
+    resultUrl: `${url}?token=secret-token&sig=secret-sig`, createdAt: 1784570752
+  }
+  assert.equal(
+    validateAgentCommand({ id: 'caller-provenance', op: 'set-target', panelId: 'result', payload: { url, providerEvidence } }).ok,
+    false
+  )
+  assert.equal(
+    validateAgentCommand({ id: 'plain-target', op: 'set-target', panelId: 'result', payload: { url } }).ok,
+    true
+  )
 })

@@ -16,7 +16,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const PLUGIN_ID = 'visual-workbench'
-const PLUGIN_VERSION = '0.6.0'
+const PLUGIN_VERSION = '0.7.0'
 const BROWSER_PANE_ID = `${PLUGIN_ID}:browser`
 const QC_PANE_ID = `${PLUGIN_ID}:qc`
 const CLOSED_PANE_ATOM = atom(false)
@@ -79,7 +79,7 @@ const QC_PROFILES = {
 }
 
 // WORKBENCH_CORE_BEGIN
-const PERSISTED_SCHEMA_VERSION = 6
+const PERSISTED_SCHEMA_VERSION = 7
 const QC_DOCUMENT_SCHEMA_VERSION = 1
 const MAX_QC_JSON_BYTES = 64 * 1024
 const CANDIDATE_IDS = ['A', 'B', 'C', 'D']
@@ -178,7 +178,7 @@ const browserWebviewSyncInstalled = new WeakSet()
 const browserViewportTasks = new Map()
 
 function persistedState() {
-  return {
+  const persisted = {
     schemaVersion: PERSISTED_SCHEMA_VERSION,
     browserSplit: state.browserSplit,
     browserPanels: state.browserPanels,
@@ -192,6 +192,7 @@ function persistedState() {
     qcJson: state.qcJson,
     capture: state.capture?.path ? state.capture : null
   }
+  return { ...restoredState(persisted), capture: persisted.capture ? restoredCapture(persisted.capture) : null }
 }
 
 function restoredState(saved) {
@@ -202,7 +203,7 @@ function restoredState(saved) {
     result: restoredPanel(source.browserPanels?.result, DEFAULT_BROWSER_PANELS.result, legacyUrl),
     reference: restoredPanel(source.browserPanels?.reference, DEFAULT_BROWSER_PANELS.reference)
   }
-  const reviewContext = restoredReviewContext(source.reviewContext, browserPanels, source.schemaVersion !== PERSISTED_SCHEMA_VERSION)
+  const reviewContext = restoredReviewContext(source.reviewContext, browserPanels, Number(source.schemaVersion) < 6)
   const restored = {
     ...DEFAULT_STATE,
     schemaVersion: PERSISTED_SCHEMA_VERSION,
@@ -218,7 +219,7 @@ function restoredState(saved) {
     qcJson: typeof source.qcJson === 'string' ? source.qcJson : '',
     capture: restoredCapture(source.capture)
   }
-  if (!restored.capture && source.schemaVersion !== PERSISTED_SCHEMA_VERSION && isRecord(source.capture)) {
+  if (!restored.capture && Number(source.schemaVersion) < 6 && isRecord(source.capture)) {
     const panel = browserPanels[source.capture.panelId]
     if (panel && source.capture.url === panel.url) {
       restored.capture = restoredCapture({ ...source.capture, targetId: panel.targetId })
@@ -248,6 +249,40 @@ function isRecord(value) {
 
 function boundedMetadataString(value, max = 4000) {
   return typeof value === 'string' ? value.slice(0, max) : ''
+}
+const URL_SECRET_PARAM = /token|sig|signature|expires|apikey|accesskey|keypair|auth|secret|credential|session|cookie|password|(?:^|[^a-z])key(?:$|[^a-z])/i
+
+function sanitizeUrl(value) {
+  const raw = boundedMetadataString(value, 4096)
+  if (!raw) return ''
+  try {
+    const url = new URL(raw)
+    for (const key of [...url.searchParams.keys()]) {
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '')
+      if (URL_SECRET_PARAM.test(normalized)) url.searchParams.delete(key)
+    }
+    if (['http:', 'https:'].includes(url.protocol)) {
+      const path = url.pathname === '/' ? '' : url.pathname
+      const base = `${url.protocol}//${url.hostname}${path}`
+      return url.searchParams.size ? `${base}?${url.searchParams}` : base
+    }
+    if (!['file:', 'data:'].includes(url.protocol)) return ''
+    url.username = ''
+    url.password = ''
+    url.hash = ''
+    return url.toString()
+  } catch {
+    return ''
+  }
+}
+
+// Mandatory gate for any future Higgsfield provider invocation.
+async function invokeHiggsfieldReadOnly(toolName, invoke, ...args) {
+  const operation = String(toolName || '').toLowerCase().replace(/^.*__/, '')
+  if (!['show_generations', 'job_status', 'get_generation', 'get_job', 'inspect', 'status'].includes(operation)) {
+    throw new Error(`Higgsfield operation ${operation || 'unknown'} is read-only only`)
+  }
+  return invoke(toolName, ...args)
 }
 
 function parsedRecord(value) {
@@ -300,14 +335,23 @@ function comparableUrl(value) {
 }
 
 function restoredProviderEvidence(value) {
-  if (!isRecord(value) || value.source !== 'higgsfield-mcp') return null
+  if (!isRecord(value)) return null
+  if (value.source === 'midjourney') {
+    const jobId = boundedMetadataString(value.jobId, 128).toLowerCase()
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId)) return null
+    return {
+      source: 'midjourney', jobId, operationId: boundedMetadataString(value.operationId, 128),
+      resultUrl: sanitizeUrl(value.resultUrl)
+    }
+  }
+  if (!['higgsfield-mcp', 'higgsfield-web'].includes(value.source)) return null
   const width = Number.isFinite(value.width) && value.width > 0 ? Math.round(value.width) : 0
   const height = Number.isFinite(value.height) && value.height > 0 ? Math.round(value.height) : 0
   const duration = Number.isFinite(value.duration) && value.duration > 0 ? value.duration : 0
   const count = Number.isInteger(value.count) && value.count > 0 ? Math.min(value.count, 20) : 1
   const referenceCount = Number.isInteger(value.referenceCount) && value.referenceCount >= 0 ? Math.min(value.referenceCount, 20) : 0
   return {
-    source: 'higgsfield-mcp',
+    source: value.source,
     jobId: boundedMetadataString(value.jobId, 128),
     status: boundedMetadataString(value.status, 64),
     model: boundedMetadataString(value.model, 128),
@@ -321,13 +365,41 @@ function restoredProviderEvidence(value) {
     resolution: boundedMetadataString(value.resolution, 32),
     count,
     referenceCount,
-    resultUrl: boundedMetadataString(value.resultUrl, 4096),
+    resultUrl: sanitizeUrl(value.resultUrl),
     createdAt: typeof value.createdAt === 'string' || Number.isFinite(value.createdAt) ? value.createdAt : '',
     checkedAt: boundedMetadataString(value.checkedAt, 64)
   }
 }
 function providerEvidenceIdentity(evidence) {
-  return evidence ? `${evidence.jobId}|${evidence.resultUrl}|${evidence.model}` : ''
+  return evidence ? [
+    evidence.source, evidence.jobId, evidence.resultUrl, evidence.model,
+    evidence.status, evidence.aspectRatio
+  ].join('|') : ''
+}
+function midjourneyJobLocation(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ''))
+    const match = url.protocol === 'https:' && !url.username && !url.password && url.port === '' &&
+      /^(?:www\.)?midjourney\.com$/.test(url.hostname.toLowerCase()) &&
+      url.pathname.match(/^\/jobs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i)
+    const candidateIndex = match && url.search === '' && url.hash === ''
+      ? -1
+      : match && url.hash === '' && /^index=[0-3]$/.test(url.search.slice(1)) ? Number(url.search.slice(-1)) : null
+    return { jobId: match?.[1]?.toLowerCase() || '', candidateIndex }
+  } catch { return { jobId: '', candidateIndex: null } }
+}
+function midjourneyProviderEvidenceForUrl(rawUrl) {
+  const location = midjourneyJobLocation(rawUrl)
+  return location.jobId && location.candidateIndex !== null
+    ? restoredProviderEvidence({ source: 'midjourney', jobId: location.jobId, resultUrl: String(rawUrl) })
+    : null
+}
+function sameMidjourneyCandidateSwitch(previousUrl, nextUrl, linkedJobId) {
+  const previous = midjourneyJobLocation(previousUrl)
+  const next = midjourneyJobLocation(nextUrl)
+  return Boolean(linkedJobId && previous.jobId === String(linkedJobId).toLowerCase() &&
+    next.jobId === previous.jobId && previous.candidateIndex !== null &&
+    Number.isInteger(next.candidateIndex) && next.candidateIndex >= 0 && previous.candidateIndex !== next.candidateIndex)
 }
 
 function providerEvidenceFor(input = {}) {
@@ -335,12 +407,10 @@ function providerEvidenceFor(input = {}) {
   if (!toolName.includes('higgsfield')) return null
   const records = providerRecords(input.toolResult)
   const src = String(input.src || '')
-  const matching = records.filter(record => resultUrls(record).some(url => comparableUrl(url) === comparableUrl(src)))
-  const recordsWithUrls = records.filter(record => resultUrls(record).length > 0)
-  const record = matching[0] || (recordsWithUrls.length === 0 && records.length === 1 ? records[0] : null)
-  if (!record) return null
+  const matching = records.filter(record => resultUrls(record).some(url => url === src))
+  if (matching.length !== 1) return null
+  const record = matching[0]
   const params = isRecord(record.params) ? record.params : {}
-  const urls = resultUrls(record)
   const mediaType = ['image', 'video', 'audio', '3d'].includes(record.type)
     ? record.type
     : /\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) ? 'video' : 'image'
@@ -359,7 +429,7 @@ function providerEvidenceFor(input = {}) {
     resolution: params.resolution || record.resolution || '',
     count: params.batch_size || params.count || record.count || 1,
     referenceCount: Array.isArray(params.medias) ? params.medias.length : 0,
-    resultUrl: urls.find(url => comparableUrl(url) === comparableUrl(src)) || urls[0] || src,
+    resultUrl: src,
     createdAt: record.createdAt || record.created_at || '',
     checkedAt: new Date().toISOString()
   })
@@ -368,7 +438,7 @@ function providerEvidenceFor(input = {}) {
 function restoredInspection(value) {
   if (!isRecord(value)) return null
   return {
-    url: boundedMetadataString(value.url, 4096),
+    url: sanitizeUrl(value.url),
     summary: boundedMetadataString(value.summary, 1000),
     checkedAt: boundedMetadataString(value.checkedAt, 64)
   }
@@ -379,7 +449,7 @@ function restoredReviewContext(value, panels, allowLegacy = false) {
   const panel = panels[value.panelId]
   const legacy = !Object.hasOwn(value, 'contextId')
   if (legacy) {
-    const url = boundedMetadataString(value.url, 4096)
+    const url = sanitizeUrl(value.url)
     if (!allowLegacy || !url || !panel?.url || url !== panel.url) return null
     return {
       contextId: createId('c'), panelId: value.panelId, targetId: panel.targetId, profileId: value.profileId,
@@ -391,7 +461,7 @@ function restoredReviewContext(value, panels, allowLegacy = false) {
       !['image', 'video', 'page'].includes(value.mediaKind) || !isRecord(value.viewport) ||
       typeof value.stale !== 'boolean' || !['', 'url-changed', 'viewport-changed', 'panels-swapped', 'provenance-changed', 'load-failed'].includes(value.staleReason) ||
       typeof value.linkedAt !== 'string' || value.linkedAt.length > 64) return null
-  const url = boundedMetadataString(value.url, 4096)
+  const url = sanitizeUrl(value.url)
   const viewport = value.viewport
   if (!url || !Number.isFinite(viewport.width) || viewport.width < 240 || !Number.isFinite(viewport.height) ||
       viewport.height < 240 || typeof viewport.preset !== 'string' || typeof viewport.responsive !== 'boolean') return null
@@ -427,29 +497,34 @@ function panelLinkedToQc(current, panelId) {
 function updatePanelState(current, panelId, patch, options = {}, makeId = createId) {
   const panel = current.browserPanels[panelId]
   if (!panel) return current
-  const { preserveQcProfileHint = false, preserveProviderEvidence = false } = options
+  const { preserveQcProfileHint = false, preserveProviderEvidence = false, preserveMidjourneyCandidate = false } = options
   const urlChanged = Object.hasOwn(patch, 'url') && patch.url !== panel.url
-  const nextUrl = Object.hasOwn(patch, 'url') ? patch.url : panel.url
+  const nextUrl = Object.hasOwn(patch, 'url') ? sanitizeUrl(patch.url) : panel.url
   const viewportChanged = ['preset', 'width', 'height'].some(key => Object.hasOwn(patch, key) && patch[key] !== panel[key])
   const provenanceChanged = Object.hasOwn(patch, 'providerEvidence') &&
     providerEvidenceIdentity(patch.providerEvidence) !== providerEvidenceIdentity(panel.providerEvidence)
-  const targetChanged = urlChanged || (viewportChanged && mediaKind(nextUrl) === 'page') || provenanceChanged
+  const candidateSwitch = urlChanged && preserveMidjourneyCandidate
+  const targetChanged = !candidateSwitch && (urlChanged || (viewportChanged && mediaKind(nextUrl) === 'page') || provenanceChanged)
   const staleReason = urlChanged ? 'url-changed' : viewportChanged ? 'viewport-changed' : 'provenance-changed'
   const nextPanel = {
     ...panel, ...patch,
+    ...(Object.hasOwn(patch, 'url') ? { url: nextUrl } : {}),
+    ...(Object.hasOwn(patch, 'providerEvidence') ? { providerEvidence: restoredProviderEvidence(patch.providerEvidence) } : {}),
     ...(targetChanged ? { targetId: makeId('t'), inspection: null } : {}),
     ...(urlChanged && !preserveQcProfileHint && !Object.hasOwn(patch, 'qcProfileHint') ? { qcProfileHint: '' } : {}),
     ...(urlChanged && !preserveProviderEvidence && !Object.hasOwn(patch, 'providerEvidence') ? { providerEvidence: null } : {})
   }
   const context = current.reviewContext
-  const reviewContext = targetChanged && context?.panelId === panelId && context.targetId === panel.targetId
-    ? { ...context, stale: true, staleReason }
-    : context
+  const reviewContext = candidateSwitch && context?.panelId === panelId && context.targetId === panel.targetId && !context.stale
+    ? { ...context, url: nextUrl, mediaKind: mediaKind(nextUrl), viewport: viewportFor(nextPanel), linkedAt: new Date().toISOString() }
+    : targetChanged && context?.panelId === panelId && context.targetId === panel.targetId
+      ? { ...context, stale: true, staleReason }
+      : context
   return {
     ...current,
     browserPanels: { ...current.browserPanels, [panelId]: nextPanel },
     reviewContext,
-    ...(targetChanged && current.capture?.panelId === panelId ? { capture: null } : {})
+    ...((targetChanged || candidateSwitch) && current.capture?.panelId === panelId ? { capture: null } : {})
   }
 }
 
@@ -459,17 +534,24 @@ function linkPanelState(current, panelId, input = {}, makeId = createId) {
   const profileId = QC_PROFILE_IDS.includes(input.profileId)
     ? input.profileId
     : QC_PROFILE_IDS.includes(panel.qcProfileHint) ? panel.qcProfileHint : 'design'
+  const inferredProviderEvidence = profileId === 'midjourney' ? midjourneyProviderEvidenceForUrl(panel.url) : null
+  const providerEvidence = profileId === 'midjourney' ? inferredProviderEvidence : restoredProviderEvidence(panel.providerEvidence)
+  const nextPanel = profileId === 'midjourney' && providerEvidenceIdentity(providerEvidence) !== providerEvidenceIdentity(panel.providerEvidence)
+    ? { ...panel, providerEvidence }
+    : panel
   const previous = current.reviewContext
   const same = previous && !previous.stale && previous.panelId === panelId &&
-    previous.targetId === panel.targetId && previous.profileId === profileId
+    previous.targetId === panel.targetId && previous.profileId === profileId &&
+    providerEvidenceIdentity(previous.providerEvidence) === providerEvidenceIdentity(providerEvidence)
   const reviewContext = same ? previous : {
     contextId: input.contextId || makeId('c'), panelId, targetId: panel.targetId, profileId, url: panel.url,
-    mediaKind: mediaKind(panel.url), viewport: viewportFor(panel),
-    providerEvidence: restoredProviderEvidence(panel.providerEvidence), linkedAt: input.linkedAt || new Date().toISOString(),
+    mediaKind: mediaKind(panel.url), viewport: viewportFor(nextPanel),
+    providerEvidence, linkedAt: input.linkedAt || new Date().toISOString(),
     stale: false, staleReason: ''
   }
   return {
     ...current,
+    browserPanels: nextPanel === panel ? current.browserPanels : { ...current.browserPanels, [panelId]: nextPanel },
     browserSplit: panelId === 'reference' ? true : current.browserSplit,
     qcProfile: profileId, qcTargetPanelId: panelId, reviewContext,
     ...(same ? {} : {
@@ -502,7 +584,11 @@ function markPanelLoadFailedState(current, panelId) {
   const panel = current.browserPanels[panelId]
   const context = current.reviewContext
   if (!panel || !context || context.stale || context.panelId !== panelId || context.targetId !== panel.targetId) return current
-  return { ...current, reviewContext: { ...context, stale: true, staleReason: 'load-failed' } }
+  return {
+    ...current,
+    reviewContext: { ...context, stale: true, staleReason: 'load-failed' },
+    ...(current.capture?.panelId === panelId ? { capture: null } : {})
+  }
 }
 
 function restoredDimension(value) {
@@ -543,7 +629,7 @@ function restoredJob(value) {
 function restoredPanel(value, defaults, legacyUrl = '') {
   const source = isRecord(value) ? value : {}
   return {
-    url: typeof source.url === 'string' ? source.url : legacyUrl,
+    url: sanitizeUrl(typeof source.url === 'string' ? source.url : legacyUrl),
     targetId: validId(source.targetId, 't') ? source.targetId : createId('t'),
     preset: typeof source.preset === 'string' ? source.preset : defaults.preset,
     width: Number.isFinite(source.width) && source.width >= 240 ? source.width : defaults.width,
@@ -574,9 +660,13 @@ function restoredCapture(value) {
   if (!isRecord(value) || !['result', 'reference'].includes(value.panelId) || !validId(value.targetId, 't')) return null
   if (!Number.isInteger(value.width) || value.width <= 0 || !Number.isInteger(value.height) || value.height <= 0) return null
   if (typeof value.path !== 'string' || !value.path) return null
+  const viewport = isRecord(value.viewport) && Number.isFinite(value.viewport.width) && Number.isFinite(value.viewport.height)
+    ? { preset: String(value.viewport.preset || ''), width: Math.round(value.viewport.width), height: Math.round(value.viewport.height), responsive: value.viewport.responsive === true }
+    : undefined
   return {
-    panelId: value.panelId, targetId: value.targetId, url: typeof value.url === 'string' ? value.url : '',
+    panelId: value.panelId, targetId: value.targetId, url: sanitizeUrl(value.url),
     width: value.width, height: value.height,
+    ...(viewport ? { viewport } : {}),
     createdAt: Number.isFinite(value.createdAt) ? value.createdAt : typeof value.createdAt === 'string' ? value.createdAt : '',
     path: value.path
   }
@@ -676,7 +766,7 @@ function qcDocumentFromState() {
 
 // Provider descriptor registry. Midjourney is the first adapter: its QC wire
 // format is the frozen schema-v1 document contract (`validateQcDocument`).
-// Descriptor dimensions MUST be drawn from the persisted schema-v6 candidate
+// Descriptor dimensions MUST be drawn from the persisted schema-v7 candidate
 // dimension vocabulary (`QC_DIMENSIONS`) so structured review state stays
 // storable without a persisted-schema bump; `assertProviderRegistry` enforces
 // this at module init.
@@ -739,6 +829,30 @@ const PROVIDERS = Object.freeze({
     chatImageToolNames: Object.freeze(['higgsfield']),
     qcDocument: null,
     automation: null
+  }),
+  'higgsfield-web': Object.freeze({
+    id: 'higgsfield-web',
+    label: 'Higgsfield Web — Unlimited',
+    profileId: 'higgsfield-image',
+    candidateIds: CANDIDATE_IDS,
+    structuredReview: true,
+    dimensions: Object.freeze(['promptFidelity', 'identityReferenceFidelity', 'anatomyGeometry', 'artifacts', 'colorMaterialFidelity', 'typography', 'composition']),
+    dimensionLabels: Object.freeze({
+      promptFidelity: 'Prompt adherence',
+      identityReferenceFidelity: 'Subject / product identity',
+      anatomyGeometry: 'Anatomy & geometry',
+      artifacts: 'Artifacts & cleanup',
+      colorMaterialFidelity: 'Color grade & critical colors',
+      typography: 'Text, logo & labels',
+      composition: 'Framing & crop'
+    }),
+    chatImageToolNames: Object.freeze([]),
+    qcDocument: null,
+    automation: Object.freeze({
+      target: 'hermes-internal-browser-pane',
+      recipe: 'higgsfield-web-2026-07-20.v1',
+      externalBrowserFallback: 'forbidden'
+    })
   })
 })
 
@@ -782,26 +896,74 @@ function qcProfileFor(input = {}) {
   if (/\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) || toolName.includes('generate_video')) return 'higgsfield-video'
   return matches.length ? matches[0].profileId : 'design'
 }
-const AGENT_COMMAND_OPS = ['status', 'set-target', 'link', 'capture', 'inspect', 'page-checks', 'set-check', 'score-candidate', 'select-candidate', 'import-qc']
+const AGENT_COMMAND_OPS = ['status', 'set-target', 'link', 'capture', 'inspect', 'page-checks', 'midjourney-probe', 'midjourney-control', 'higgsfield-control', 'set-check', 'score-candidate', 'select-candidate', 'import-qc']
 const AGENT_PANEL_IDS = ['result', 'reference']
 const AGENT_CHECK_STATUSES = ['pass', 'fail', 'na', 'pending']
+const MIDJOURNEY_CONTROL_ACTIONS = ['capabilities', 'state', 'navigate', 'probe', 'results', 'settings', 'draft', 'attach', 'detach', 'validate', 'submit', 'wait', 'link', 'grid', 'action', 'download', 'capture', 'qc']
+const HIGGSFIELD_MODELS = ['Seedream 5.0 Lite', 'Nano Banana 2', 'Seedream 4.5']
+const HIGGSFIELD_ASPECTS = ['1:1', '9:16', '16:9']
+const HIGGSFIELD_GENERATION_STATUSES = ['idle', 'queued', 'generating', 'complete', 'failed', 'unknown']
+const HIGGSFIELD_CONTROL_ACTIONS = ['capabilities', 'state', 'navigate', 'draft', 'validate', 'generate', 'results', 'observe', 'link', 'repair', 'qc']
 
 function agentCommandError(message) { return { ok: false, error: message } }
 function hasOnlyKeys(value, keys) { return Object.keys(value).every(key => keys.includes(key)) }
 function validAgentString(value, max) { return typeof value === 'string' && value.length <= max }
+function validateMidjourneyControlPayload(payload) {
+  if (!isRecord(payload) || !MIDJOURNEY_CONTROL_ACTIONS.includes(payload.action)) return false
+  const common = ['action']
+  if (['capabilities', 'state', 'probe', 'results', 'validate', 'grid', 'capture', 'qc'].includes(payload.action)) return hasOnlyKeys(payload, common)
+  if (payload.action === 'settings') {
+    if (hasOnlyKeys(payload, common)) return true
+    if (!hasOnlyKeys(payload, [...common, 'name', 'value']) || !validAgentString(payload.name, 40)) return false
+    const choices = {
+      aspect: ['portrait', 'square', 'landscape'], model: ['standard', 'hd'], raw: ['standard', 'raw'],
+      speed: ['relax', 'fast'], videoResolution: ['sd', 'hd'], personalization: [true, false]
+    }
+    if (Object.hasOwn(choices, payload.name)) return choices[payload.name].includes(payload.value)
+    return false
+  }
+  if (payload.action === 'download') return hasOnlyKeys(payload, [...common, 'jobId', 'filename']) && validAgentString(payload.jobId, 80) && /^[A-Za-z0-9_-]+$/.test(payload.jobId) && validAgentString(payload.filename, 120) && /^[A-Za-z0-9._-]+\.(?:png|jpe?g|webp|gif|avif|bmp)$/i.test(payload.filename)
+  if (payload.action === 'navigate') return hasOnlyKeys(payload, [...common, 'url']) && validAgentString(payload.url, 4096) && /^https:\/\/(?:www\.)?midjourney\.com(?:\/|$)/i.test(payload.url)
+  if (payload.action === 'draft') return hasOnlyKeys(payload, [...common, 'prompt', 'parameters']) && validAgentString(payload.prompt, 6000) && payload.prompt.trim().length > 0 && (!Object.hasOwn(payload, 'parameters') || isRecord(payload.parameters))
+  if (payload.action === 'attach') return hasOnlyKeys(payload, [...common, 'path', 'role']) && validAgentString(payload.path, 4096) && payload.path.length > 0 && ['start-frame', 'image-prompt', 'style-reference', 'omni-reference'].includes(payload.role)
+  if (payload.action === 'detach') return hasOnlyKeys(payload, [...common, 'role']) && ['start-frame', 'image-prompt', 'style-reference', 'omni-reference'].includes(payload.role)
+  if (payload.action === 'submit') return hasOnlyKeys(payload, [...common, 'approved', 'idempotencyKey', 'validateReceipt', 'batchFingerprint']) && payload.approved === true && validAgentString(payload.idempotencyKey, 128) && payload.idempotencyKey.length >= 8 && validAgentString(payload.validateReceipt, 80) && payload.validateReceipt.length > 0 && /^[a-f0-9]{64}$/.test(String(payload.batchFingerprint || ''))
+  if (payload.action === 'wait') return hasOnlyKeys(payload, [...common, 'timeoutMs']) && (!Object.hasOwn(payload, 'timeoutMs') || Number.isInteger(payload.timeoutMs) && payload.timeoutMs >= 1000 && payload.timeoutMs <= 30000)
+  if (payload.action === 'link') return hasOnlyKeys(payload, [...common, 'operationId', 'prompt', 'jobId', 'acknowledged', 'ledgerCreatedAt']) && /^[a-f0-9]{64}$/.test(String(payload.operationId || '')) && validAgentString(payload.prompt, 6000) && payload.prompt.trim().length > 0 && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(payload.jobId || '')) && payload.acknowledged === true && validAgentString(payload.ledgerCreatedAt, 40) && Number.isFinite(Date.parse(payload.ledgerCreatedAt))
+  if (payload.action === 'action') {
+    const validName = ['select', 'upscale', 'vary', 'reroll', 'pan', 'zoom'].includes(payload.name)
+    const validCandidate = !Object.hasOwn(payload, 'candidate') || ['A', 'B', 'C', 'D', '1', '2', '3', '4'].includes(String(payload.candidate))
+    const validJob = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(payload.jobId || ''))
+    if (payload.name === 'select') return hasOnlyKeys(payload, [...common, 'name', 'candidate', 'jobId']) && validName && Object.hasOwn(payload, 'candidate') && validCandidate && validJob
+    return hasOnlyKeys(payload, [...common, 'name', 'candidate', 'jobId', 'approved', 'idempotencyKey']) && validName && validCandidate && validJob && payload.approved === true && validAgentString(payload.idempotencyKey, 128) && payload.idempotencyKey.length >= 8
+  }
+  return false
+}
+function validateHiggsfieldControlPayload(payload) {
+  if (!isRecord(payload) || !HIGGSFIELD_CONTROL_ACTIONS.includes(payload.action)) return false
+  if (['capabilities', 'state', 'validate', 'results', 'observe', 'qc'].includes(payload.action)) return hasOnlyKeys(payload, ['action'])
+  if (payload.action === 'navigate') return hasOnlyKeys(payload, ['action', 'url']) && validAgentString(payload.url, 4096) && /^https:\/\/(?:www\.)?higgsfield\.ai(?:\/|$)/i.test(payload.url)
+  if (payload.action === 'draft') return hasOnlyKeys(payload, ['action', 'prompt', 'aspect', 'model']) && validAgentString(payload.prompt, 6000) && payload.prompt.trim().length > 0 && HIGGSFIELD_ASPECTS.includes(payload.aspect) && HIGGSFIELD_MODELS.includes(payload.model)
+  if (payload.action === 'generate') return hasOnlyKeys(payload, ['action', 'billableConfirmed', 'idempotencyKey', 'validateReceipt', 'batchFingerprint']) && payload.billableConfirmed === true && validAgentString(payload.idempotencyKey, 128) && payload.idempotencyKey.length >= 8 && validAgentString(payload.validateReceipt, 80) && /^[a-f0-9]{64}$/.test(String(payload.batchFingerprint || ''))
+  if (payload.action === 'link') return hasOnlyKeys(payload, ['action', 'observationReceipt']) && validAgentString(payload.observationReceipt, 80) && payload.observationReceipt.length > 0
+  if (payload.action === 'repair') return hasOnlyKeys(payload, ['action', 'approved']) && payload.approved === true
+  return false
+}
 
 function validateAgentCommand(value) {
   if (!isRecord(value) || !hasOnlyKeys(value, ['id', 'op', 'panelId', 'payload'])) return agentCommandError('Command must be an object with only id, op, panelId, and payload')
   if (!validAgentString(value.id, 64) || !value.id) return agentCommandError('id must be a non-empty string of at most 64 characters')
   if (!AGENT_COMMAND_OPS.includes(value.op)) return agentCommandError('op is unknown')
   if (!isRecord(value.payload)) return agentCommandError('payload must be an object')
-  const needsPanel = ['set-target', 'link', 'capture', 'inspect', 'page-checks'].includes(value.op)
+  const needsPanel = ['set-target', 'link', 'capture', 'inspect', 'page-checks', 'midjourney-probe', 'midjourney-control', 'higgsfield-control'].includes(value.op)
   if (needsPanel ? !AGENT_PANEL_IDS.includes(value.panelId) : Object.hasOwn(value, 'panelId')) return agentCommandError(needsPanel ? 'panelId must be result or reference' : 'panelId is not allowed for this op')
   const payload = value.payload
   if (value.op === 'status' && hasOnlyKeys(payload, [])) return { ok: true, command: value }
   if (value.op === 'set-target' && hasOnlyKeys(payload, ['url', 'preset', 'width', 'height']) && validAgentString(payload.url, 4096) && /^(https?|file|data):/i.test(payload.url) && (!Object.hasOwn(payload, 'preset') || validAgentString(payload.preset, 64)) && (!Object.hasOwn(payload, 'width') || Number.isInteger(payload.width) && payload.width >= 240) && (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240)) return { ok: true, command: value }
   if (value.op === 'link' && hasOnlyKeys(payload, ['profileId']) && (!Object.hasOwn(payload, 'profileId') || QC_PROFILE_IDS.includes(payload.profileId))) return { ok: true, command: value }
-  if (['capture', 'inspect', 'page-checks'].includes(value.op) && hasOnlyKeys(payload, [])) return { ok: true, command: value }
+  if (['capture', 'inspect', 'page-checks', 'midjourney-probe'].includes(value.op) && hasOnlyKeys(payload, [])) return { ok: true, command: value }
+  if (value.op === 'midjourney-control' && validateMidjourneyControlPayload(payload)) return { ok: true, command: value }
+  if (value.op === 'higgsfield-control' && validateHiggsfieldControlPayload(payload)) return { ok: true, command: value }
   if (value.op === 'set-check' && hasOnlyKeys(payload, ['profileId', 'checkId', 'status', 'note']) && QC_PROFILE_IDS.includes(payload.profileId) && validAgentString(payload.checkId, 64) && payload.checkId && AGENT_CHECK_STATUSES.includes(payload.status) && (!Object.hasOwn(payload, 'note') || validAgentString(payload.note, 2000))) return { ok: true, command: value }
   if (value.op === 'score-candidate' && hasOnlyKeys(payload, ['candidateId', 'summary', 'score', 'disposition', 'repairPrompt', 'dimensions']) && CANDIDATE_IDS.includes(payload.candidateId) && (!Object.hasOwn(payload, 'summary') || validAgentString(payload.summary, 2000)) && (!Object.hasOwn(payload, 'score') || Number.isInteger(payload.score) && payload.score >= 0 && payload.score <= 100) && (!Object.hasOwn(payload, 'disposition') || DISPOSITIONS.includes(payload.disposition)) && (!Object.hasOwn(payload, 'repairPrompt') || validAgentString(payload.repairPrompt, 4000)) && (!Object.hasOwn(payload, 'dimensions') || isRecord(payload.dimensions) && Object.entries(payload.dimensions).every(([key, dimension]) => QC_DIMENSIONS.includes(key) && isRecord(dimension) && hasOnlyKeys(dimension, ['score', 'evidence']) && Number.isInteger(dimension.score) && dimension.score >= 0 && dimension.score <= 100 && validAgentString(dimension.evidence, 2000)))) return { ok: true, command: value }
   if (value.op === 'select-candidate' && hasOnlyKeys(payload, ['candidateId']) && CANDIDATE_IDS.includes(payload.candidateId)) return { ok: true, command: value }
@@ -821,14 +983,18 @@ function agentStatusSnapshot(current) {
     qcTargetPanelId: current.qcTargetPanelId,
     reviewContext: context ? {
       contextId: context.contextId, panelId: context.panelId, targetId: context.targetId, profileId: context.profileId,
-      url: context.url, mediaKind: context.mediaKind, stale: context.stale, staleReason: context.staleReason,
+      url: sanitizeUrl(context.url), mediaKind: context.mediaKind, stale: context.stale, staleReason: context.staleReason,
       providerJobId: context.providerEvidence?.jobId || ''
     } : null,
     panels: Object.fromEntries(AGENT_PANEL_IDS.map(panelId => {
       const panel = current.browserPanels[panelId] || {}
-      return [panelId, { url: panel.url || '', targetId: panel.targetId || '', mediaKind: mediaKind(panel.url) }]
+      return [panelId, { url: sanitizeUrl(panel.url), targetId: panel.targetId || '', mediaKind: mediaKind(panel.url) }]
     })),
-    capture: current.capture ? { panelId: current.capture.panelId, targetId: current.capture.targetId, width: current.capture.width, height: current.capture.height, path: current.capture.path } : null,
+    capture: current.capture ? {
+      panelId: current.capture.panelId, targetId: current.capture.targetId, url: sanitizeUrl(current.capture.url),
+      ...(current.capture.viewport ? { viewport: current.capture.viewport } : {}),
+      width: current.capture.width, height: current.capture.height, path: current.capture.path
+    } : null,
     evaluations: Object.fromEntries(Object.entries(current.evaluations || {}).map(([profileId, checks]) => [profileId, Object.fromEntries(Object.entries(checks || {}).map(([checkId, evaluation]) => [checkId, { status: evaluation.status }]))])),
     candidates: Object.fromEntries(CANDIDATE_IDS.map(id => {
       const candidate = current.candidates?.[id] || blankCandidate(id)
@@ -844,7 +1010,7 @@ function applyAgentCommand(current, command, makeId = createId) {
   const { op, payload } = command
   if (op === 'status') return { state: current, summary: 'Status snapshot' }
   if (op === 'set-target') {
-    const patch = Object.fromEntries(Object.entries(payload).filter(([key]) => ['url', 'preset', 'width', 'height'].includes(key)))
+    const patch = Object.fromEntries(Object.entries(payload).filter(([key]) => ['url', 'preset', 'width', 'height', 'providerEvidence'].includes(key)))
     return { state: updatePanelState(current, command.panelId, patch, {}, makeId), summary: `Set ${command.panelId} target` }
   }
   if (op === 'link') {
@@ -876,7 +1042,7 @@ function applyAgentCommand(current, command, makeId = createId) {
 
 function setState(patch) {
   state = { ...state, ...patch }
-  pluginContext?.storage.set('workbench.v6', persistedState())
+  pluginContext?.storage.set('workbench.v7', persistedState())
   listeners.forEach(listener => listener())
 }
 
@@ -969,9 +1135,10 @@ async function captureBrowserPanel(panelId, { save = false } = {}) {
       panelId, targetId: panel.targetId, url: panel.url,
       width: kind === 'image' ? element.naturalWidth : element.videoWidth,
       height: kind === 'image' ? element.naturalHeight : element.videoHeight,
-      createdAt: Date.now(), path: ''
+      viewport: viewportFor(panel), createdAt: Date.now(), path: ''
     }
-    if (state.browserPanels[panelId]?.targetId !== panel.targetId) {
+    if (state.browserPanels[panelId]?.targetId !== panel.targetId ||
+        JSON.stringify(viewportFor(state.browserPanels[panelId])) !== JSON.stringify(evidence.viewport)) {
       throw new Error('Target changed during capture; evidence was not attached')
     }
     setState({ capture: evidence })
@@ -993,7 +1160,8 @@ async function captureBrowserPanel(panelId, { save = false } = {}) {
     throw new Error('Host returned an invalid capture')
   }
   if (state.browserPanels[panelId]?.targetId !== startTargetId ||
-      await currentBrowserUrl(browserApi, guestId, webview, startUrl) !== startUrl) {
+      await currentBrowserUrl(browserApi, guestId, webview, startUrl) !== startUrl ||
+      JSON.stringify(viewportFor(state.browserPanels[panelId])) !== JSON.stringify(viewportFor(panel))) {
     throw new Error('Target changed during capture; evidence was not attached')
   }
 
@@ -1007,13 +1175,14 @@ async function captureBrowserPanel(panelId, { save = false } = {}) {
   }
 
   if (state.browserPanels[panelId]?.targetId !== startTargetId ||
-      await currentBrowserUrl(browserApi, guestId, webview, startUrl) !== startUrl) {
+      await currentBrowserUrl(browserApi, guestId, webview, startUrl) !== startUrl ||
+      JSON.stringify(viewportFor(state.browserPanels[panelId])) !== JSON.stringify(viewportFor(panel))) {
     throw new Error('Target changed before evidence was attached')
   }
 
   const evidence = {
     panelId, targetId: startTargetId, url: startUrl, width: capture.width, height: capture.height,
-    createdAt: capture.createdAt, path
+    viewport: viewportFor(panel), createdAt: capture.createdAt, path
   }
   setState({ capture: evidence })
   return { ...evidence, canceled }
@@ -1048,6 +1217,611 @@ async function inspectBrowserPanel(panelId) {
     }
   })
   return summary
+}
+
+const MIDJOURNEY_SELECTOR_REGISTRY = Object.freeze({
+  version: 'mj-web-2026-07-19.v3',
+  targets: Object.freeze(['composer', 'settings-toggle', 'personalization-toggle', 'personalization-menu', 'add-images', 'add-start-frame', 'add-style-reference', 'add-omni-reference', 'switch-to-image', 'switch-to-video', 'image-file-input', 'start-frame', 'image-prompt', 'style-reference', 'omni', 'aspect-portrait', 'aspect-square', 'aspect-landscape', 'model-standard', 'model-hd', 'raw-standard', 'raw-on', 'speed-relax', 'speed-fast', 'video-sd', 'video-hd', 'personalization-on', 'personalization-off', 'submit', 'select', 'upscale', 'vary', 'reroll', 'pan', 'zoom', 'result-image', 'result-link'])
+})
+const HIGGSFIELD_SELECTOR_REGISTRY = Object.freeze({
+  version: 'higgsfield-web-2026-07-20.v1',
+  targets: Object.freeze(['higgsfield-composer', 'higgsfield-aspect-square', 'higgsfield-aspect-portrait', 'higgsfield-aspect-landscape', 'higgsfield-model-seedream-5-lite', 'higgsfield-model-nano-banana-2', 'higgsfield-model-seedream-4-5', 'higgsfield-generate'])
+})
+const higgsfieldValidations = new Map()
+const higgsfieldObservationReceipts = new Map()
+const higgsfieldDrafts = new Map()
+const HIGGSFIELD_MODEL_TARGETS = Object.freeze({
+  'Seedream 5.0 Lite': 'higgsfield-model-seedream-5-lite',
+  'Nano Banana 2': 'higgsfield-model-nano-banana-2',
+  'Seedream 4.5': 'higgsfield-model-seedream-4-5'
+})
+const HIGGSFIELD_ASPECT_TARGETS = Object.freeze({
+  '1:1': 'higgsfield-aspect-square', '16:9': 'higgsfield-aspect-landscape', '9:16': 'higgsfield-aspect-portrait'
+})
+const HIGGSFIELD_OBSERVATION_TTL_MS = 60_000
+function redactedHiggsfieldResultUrl(value) {
+  try {
+    const url = new URL(String(value || ''))
+    url.search = ''
+    url.hash = ''
+    return url.toString()
+  } catch { return '' }
+}
+function observedHiggsfieldState(value, context) {
+  if (!isRecord(value) || value.guestWebContentsId !== context.guestId || value.url !== context.url ||
+    !HIGGSFIELD_MODELS.includes(value.selectedModel) || !HIGGSFIELD_ASPECTS.includes(value.selectedAspect) ||
+    value.unlimited !== true || !HIGGSFIELD_GENERATION_STATUSES.includes(value.generationStatus) || !Array.isArray(value.results)) {
+    throw new Error('Higgsfield observation did not satisfy the browser-control contract')
+  }
+  const results = value.results.map(result => isRecord(result) && typeof result.url === 'string' &&
+    typeof result.providerJobId === 'string' && result.url ? { url: result.url, providerJobId: result.providerJobId } : null)
+  if (results.some(result => !result) || results.length > 1) throw new Error('Higgsfield observation contains an invalid or ambiguous result')
+  return { ...value, results }
+}
+async function observeHiggsfield(panelId, context, requireLinkableResult = true) {
+  const observed = observedHiggsfieldState(await higgsfieldControl(panelId, { op: 'observeHiggsfield' }, context), context)
+  if (!requireLinkableResult) return { observed, receipt: '' }
+  if (observed.generationStatus !== 'complete' || observed.results.length !== 1) {
+    throw new Error('A completed unambiguous Higgsfield result is required before linking')
+  }
+  const receipt = createId('hfo-')
+  higgsfieldObservationReceipts.set(receipt, {
+    panelId, targetId: context.targetId, guestId: context.guestId, sourceUrl: context.url,
+    result: observed.results[0], selectedModel: observed.selectedModel, selectedAspect: observed.selectedAspect,
+    generationStatus: observed.generationStatus, expiresAt: Date.now() + HIGGSFIELD_OBSERVATION_TTL_MS
+  })
+  return { observed, receipt }
+}
+function consumeHiggsfieldObservation(panelId, context, receipt) {
+  const observation = higgsfieldObservationReceipts.get(receipt)
+  higgsfieldObservationReceipts.delete(receipt)
+  if (!observation || observation.expiresAt < Date.now() || observation.panelId !== panelId ||
+    observation.targetId !== context.targetId || observation.guestId !== context.guestId ||
+    observation.sourceUrl !== context.url) throw new Error('A fresh matching Higgsfield observation receipt is required')
+  return observation
+}
+function isHiggsfieldPage(rawUrl) {
+  try {
+    const hostname = new URL(rawUrl).hostname.toLowerCase()
+    return hostname === 'higgsfield.ai' || hostname.endsWith('.higgsfield.ai')
+  } catch { return false }
+}
+function currentHiggsfieldContext(panelId) {
+  const browserApi = window.hermesDesktop?.browser
+  const webview = browserWebviews.get(panelId)
+  const panel = state.browserPanels[panelId]
+  const guestId = webview?.getWebContentsId?.()
+  const url = String(webview?.getURL?.() || '')
+  if (!browserApi?.control || !panel || !Number.isInteger(guestId) || !isHiggsfieldPage(url) || panel.url !== url) {
+    throw new Error('Open the current Higgsfield page in the Browser pane')
+  }
+  return { browserApi, webview, panel, guestId, targetId: panel.targetId, url }
+}
+function sameHiggsfieldContext(panelId, context) {
+  const panel = state.browserPanels[panelId]
+  return Boolean(panel && panel.targetId === context.targetId && panel.url === context.url &&
+    browserWebviews.get(panelId)?.getWebContentsId?.() === context.guestId)
+}
+async function higgsfieldControl(panelId, request, context = currentHiggsfieldContext(panelId)) {
+  if (!sameHiggsfieldContext(panelId, context)) throw new Error('Higgsfield panel target or URL changed')
+  const result = await context.browserApi.control(context.guestId, {
+    provider: 'higgsfield', recipe: HIGGSFIELD_SELECTOR_REGISTRY.version, expectedUrl: context.url, ...request
+  })
+  if (!sameHiggsfieldContext(panelId, context)) throw new Error('Higgsfield panel target or URL changed')
+  return result
+}
+function higgsfieldNode(snapshot, id, role, required = true) {
+  const matches = Array.isArray(snapshot?.nodes) ? snapshot.nodes.filter(node => node?.id === id && (!role || node.role === role)) : []
+  if (matches.length !== 1) {
+    if (!required && matches.length === 0) return null
+    throw new Error(`Higgsfield target ${id} is ambiguous or unavailable`)
+  }
+  return matches[0]
+}
+async function runHiggsfieldControl(panelId, payload) {
+  if (payload.action === 'capabilities') return { summary: 'Higgsfield Web — Unlimited control capabilities', detail: { state: 'READY', evidence: { selectorRegistry: HIGGSFIELD_SELECTOR_REGISTRY.version, models: HIGGSFIELD_MODELS, billableGenerate: true } } }
+  if (payload.action === 'navigate') {
+    setBrowserPanel(panelId, { url: payload.url, qcProfileHint: 'higgsfield-image' })
+    host.panes?.setOpen?.(BROWSER_PANE_ID, true)
+    return { summary: `Navigated ${panelId} to Higgsfield`, detail: { state: 'NAVIGATING', evidence: { panelId, requestedUrl: payload.url } } }
+  }
+  if (payload.action === 'repair') {
+    const context = state.reviewContext
+    const providerEvidence = context?.providerEvidence
+    if (!reviewContextMatches(state, 'higgsfield-image') || context?.panelId !== panelId ||
+      providerEvidence?.source !== 'higgsfield-web' || !providerEvidence.jobId || providerEvidence.status !== 'complete') {
+      throw new Error('Link a fresh completed Higgsfield Web result in this panel before approving repair')
+    }
+    const candidateId = state.selectedCandidate
+    const candidate = state.candidates[candidateId]
+    if (candidate?.disposition !== 'REPAIR' || !candidate.repairPrompt?.trim()) {
+      throw new Error('The selected QC candidate must have a reviewed REPAIR disposition and stored repair prompt')
+    }
+    return { summary: 'Higgsfield repair draft handoff approved', detail: { state: 'DRAFT_HANDOFF', evidence: { provider: 'higgsfield-web', candidateId, prompt: candidate.repairPrompt.trim(), generation: 'not-invoked' } } }
+  }
+  const context = currentHiggsfieldContext(panelId)
+  if (payload.action === 'state') {
+    const { observed } = await observeHiggsfield(panelId, context, false)
+    return { summary: 'Higgsfield typed browser state', detail: { state: 'OBSERVED', evidence: observed } }
+  }
+  if (payload.action === 'results' || payload.action === 'observe') {
+    const { observed, receipt } = await observeHiggsfield(panelId, context)
+    return { summary: 'Higgsfield typed browser observation', detail: { state: 'OBSERVED', evidence: observed, observationReceipt: receipt } }
+  }
+  if (payload.action === 'link') {
+    const observation = consumeHiggsfieldObservation(panelId, context, payload.observationReceipt)
+    const resultUrl = redactedHiggsfieldResultUrl(observation.result.url)
+    if (!resultUrl) throw new Error('Observed Higgsfield result URL is invalid')
+    const providerEvidence = restoredProviderEvidence({
+      source: 'higgsfield-web', jobId: observation.result.providerJobId, status: observation.generationStatus,
+      model: observation.selectedModel, aspectRatio: observation.selectedAspect, resultUrl
+    })
+    setState(linkPanelState(updatePanelState(state, panelId, {
+      url: resultUrl, providerEvidence, qcProfileHint: 'higgsfield-image'
+    }), panelId, { profileId: 'higgsfield-image' }, createId))
+    return { summary: 'Observed Higgsfield result linked to Quality Control', detail: { state: 'LINKED', evidence: { providerEvidence } } }
+  }
+  if (payload.action === 'draft') {
+    await higgsfieldControl(panelId, { op: 'focusText', targetId: 'higgsfield-composer', text: payload.prompt.trim(), replace: true }, context)
+    await higgsfieldControl(panelId, { op: 'activate', targetId: HIGGSFIELD_ASPECT_TARGETS[payload.aspect] }, context)
+    await higgsfieldControl(panelId, { op: 'activate', targetId: HIGGSFIELD_MODEL_TARGETS[payload.model] }, context)
+    higgsfieldDrafts.set(panelId, { targetId: context.targetId, url: context.url, prompt: payload.prompt.trim(), aspect: payload.aspect, model: payload.model })
+    return { summary: 'Higgsfield draft set', detail: { state: 'DRAFT', evidence: { panelId, targetId: context.targetId, url: context.url, prompt: payload.prompt.trim(), aspect: payload.aspect, model: payload.model } } }
+  }
+  if (payload.action === 'validate') {
+    const draft = higgsfieldDrafts.get(panelId)
+    if (!draft || draft.targetId !== context.targetId || draft.url !== context.url) throw new Error('Set a fresh Higgsfield draft before validation')
+    const snapshot = await higgsfieldControl(panelId, { op: 'snapshot' }, context)
+    const prompt = higgsfieldNode(snapshot, 'higgsfield-composer', 'textbox').value
+    const selected = node => ['true', 'on', 'selected'].includes(String(node?.attrs?.['aria-selected'] || node?.attrs?.['aria-pressed'] || node?.attrs?.['data-selected'] || node?.attrs?.['data-active'] || node?.attrs?.['data-state'] || '').toLowerCase())
+    if (prompt !== draft.prompt ||
+      !selected(higgsfieldNode(snapshot, HIGGSFIELD_ASPECT_TARGETS[draft.aspect], 'button')) ||
+      !selected(higgsfieldNode(snapshot, HIGGSFIELD_MODEL_TARGETS[draft.model], 'button'))) {
+      throw new Error('Higgsfield prompt, aspect, or model changed after draft')
+    }
+    const receipt = createId('hfv-')
+    const batchFingerprint = await midjourneyPromptHash(`${prompt}\n${draft.aspect}\n${draft.model}`)
+    const expiresAtMs = Date.now() + 60_000
+    const expiresAt = new Date(expiresAtMs).toISOString()
+    higgsfieldValidations.set(receipt, { panelId, targetId: context.targetId, url: context.url, prompt, aspect: draft.aspect, model: draft.model, batchFingerprint, expiresAt: expiresAtMs })
+    return { summary: 'Higgsfield draft is generate-ready', receiptContext: { receiptHash: await midjourneyPromptHash(receipt), batchContextId: batchFingerprint, expiresAt, batchFingerprint }, detail: { state: 'READY', evidence: { prompt, aspect: draft.aspect, model: draft.model, receipt, expiresAt } } }
+  }
+  if (payload.action === 'generate') {
+    const validation = higgsfieldValidations.get(payload.validateReceipt)
+    if (!validation || validation.expiresAt < Date.now() || validation.panelId !== panelId || validation.targetId !== context.targetId || validation.url !== context.url || validation.batchFingerprint !== payload.batchFingerprint) throw new Error('A fresh matching Higgsfield validate receipt is required')
+    if (payload.billableConfirmed !== true) throw new Error('Higgsfield Generate is billable and requires billableConfirmed=true')
+    higgsfieldValidations.delete(payload.validateReceipt)
+    const snapshot = await higgsfieldControl(panelId, { op: 'snapshot' }, context)
+    const prompt = higgsfieldNode(snapshot, 'higgsfield-composer', 'textbox').value
+    const selected = node => ['true', 'on', 'selected'].includes(String(node?.attrs?.['aria-selected'] || node?.attrs?.['aria-pressed'] || node?.attrs?.['data-selected'] || node?.attrs?.['data-active'] || node?.attrs?.['data-state'] || '').toLowerCase())
+    if (prompt !== validation.prompt ||
+      !selected(higgsfieldNode(snapshot, HIGGSFIELD_ASPECT_TARGETS[validation.aspect], 'button')) ||
+      !selected(higgsfieldNode(snapshot, HIGGSFIELD_MODEL_TARGETS[validation.model], 'button'))) {
+      throw new Error('Higgsfield prompt, aspect, or model changed after validation')
+    }
+    await higgsfieldControl(panelId, { op: 'generate', targetId: 'higgsfield-generate', billable: true }, context)
+    return { summary: 'Higgsfield generation submitted (billable external action)', detail: { state: 'SUBMITTED', evidence: { panelId, targetId: context.targetId, receipt: payload.validateReceipt } } }
+  }
+  return { summary: 'Higgsfield QC state', detail: { state: 'QC_RUNNING', evidence: { panelId, qc: agentStatusSnapshot(state) } } }
+}
+const MIDJOURNEY_CAPABILITIES = Object.freeze({
+  selectorRegistry: MIDJOURNEY_SELECTOR_REGISTRY.version,
+  transport: 'window.hermesDesktop.browser.control',
+  supported: Object.freeze(['capabilities', 'state', 'navigate', 'probe', 'results', 'settings', 'draft', 'attach', 'detach', 'validate', 'submit', 'wait', 'link', 'grid', 'action', 'download', 'capture', 'qc']),
+  approvalGated: Object.freeze(['submit', 'upscale', 'vary', 'reroll', 'pan', 'zoom']),
+  implemented: Object.freeze(['settings', 'attach', 'detach', 'draft', 'link', 'grid', 'select', 'upscale', 'vary', 'reroll', 'pan', 'zoom', 'download'])
+})
+const midjourneyDrafts = new Map()
+const midjourneyAttachments = new Map()
+const midjourneyValidations = new Map()
+const midjourneyLinks = new Map()
+const MIDJOURNEY_LEDGER_MAX = 32
+const MIDJOURNEY_VALIDATION_TTL_MS = 60_000
+const MIDJOURNEY_WAIT_MAX_MS = 30_000
+
+function isMidjourneyPage(rawUrl) {
+  try {
+    const hostname = new URL(rawUrl).hostname.toLowerCase()
+    return hostname === 'midjourney.com' || hostname.endsWith('.midjourney.com')
+  } catch { return false }
+}
+function midjourneyError(error) {
+  return String(error instanceof Error ? error.message : error).replace(/[\r\n\t]+/g, ' ').replace(/[^\x20-\x7e]/g, '').slice(0, 300)
+}
+function boundedMidjourneyLedger(ledger, key, value) {
+  ledger.set(key, value)
+  while (ledger.size > MIDJOURNEY_LEDGER_MAX) ledger.delete(ledger.keys().next().value)
+}
+function midjourneyOperation(stateName, evidence = {}, error = '') {
+  return { operationId: createId('mj-'), state: stateName, evidence, error: midjourneyError(error) }
+}
+function currentMidjourneyContext(panelId) {
+  const browserApi = window.hermesDesktop?.browser
+  const webview = browserWebviews.get(panelId)
+  const panel = state.browserPanels[panelId]
+  const guestId = webview?.getWebContentsId?.()
+  const url = String(webview?.getURL?.() || '')
+  if (!browserApi?.control || !panel || !Number.isInteger(guestId) || !isMidjourneyPage(url) || panel.url !== url) {
+    throw new Error('Open the current Midjourney page in the Browser pane')
+  }
+  return { browserApi, webview, panel, guestId, targetId: panel.targetId, url }
+}
+function sameMidjourneyContext(panelId, context) {
+  const panel = state.browserPanels[panelId]
+  return Boolean(panel && panel.targetId === context.targetId && panel.url === context.url &&
+    browserWebviews.get(panelId)?.getWebContentsId?.() === context.guestId &&
+    String(browserWebviews.get(panelId)?.getURL?.() || '') === context.url)
+}
+async function midjourneyControl(panelId, request, context = currentMidjourneyContext(panelId)) {
+  if (!sameMidjourneyContext(panelId, context)) throw new Error('Midjourney panel target or URL changed')
+  const result = await context.browserApi.control(context.guestId, {
+    recipe: MIDJOURNEY_SELECTOR_REGISTRY.version, expectedUrl: context.url, ...request
+  })
+  if (!sameMidjourneyContext(panelId, context)) throw new Error('Midjourney panel target or URL changed')
+  return result
+}
+function midjourneyNodes(snapshot) {
+  if (!snapshot || typeof snapshot.url !== 'string' || !Array.isArray(snapshot.nodes)) throw new Error('Midjourney snapshot is incomplete')
+  return snapshot.nodes.slice(0, 48)
+}
+function midjourneyNode(snapshot, id, role, required = true) {
+  const matches = midjourneyNodes(snapshot).filter(node => node?.id === id && (!role || node.role === role))
+  if (matches.length !== 1) {
+    if (!required && matches.length === 0) return null
+    throw new Error(`Midjourney target ${id} is ambiguous or unavailable`)
+  }
+  return matches[0]
+}
+function midjourneyRoleSelected(node) {
+  const attrs = node?.attrs || {}
+  return attrs['aria-pressed'] === 'true' || attrs['aria-selected'] === 'true' ||
+    ['active', 'checked', 'on', 'selected', 'true'].includes(String(attrs['data-state'] || '').toLowerCase()) ||
+    String(attrs.class || '').split(/\s+/).includes('text-splash')
+}
+function normalizedMidjourneyPrompt(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ')
+}
+function normalizedMidjourneyPromptBody(value) {
+  return normalizedMidjourneyPrompt(value).replace(/\s--[a-z][\s\S]*$/i, '').trim()
+}
+async function midjourneyPromptHash(value) {
+  const bytes = new TextEncoder().encode(normalizedMidjourneyPrompt(value))
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(byte => byte.toString(16).padStart(2, '0')).join('')
+}
+function midjourneyJobId(rawUrl) {
+  return midjourneyJobLocation(rawUrl).jobId
+}
+function selectedMidjourneyRoles(snapshot) {
+  return ['start-frame', 'image-prompt', 'style-reference', 'omni']
+    .filter(id => {
+      const node = midjourneyNode(snapshot, id, 'button', false)
+      return Boolean(node?.visible && midjourneyRoleSelected(node))
+    })
+}
+async function midjourneySnapshot(panelId, context = currentMidjourneyContext(panelId)) {
+  const snapshot = await midjourneyControl(panelId, { op: 'snapshot' }, context)
+  if (snapshot.url !== context.url) throw new Error('Midjourney snapshot URL changed')
+  return { context, snapshot, nodes: midjourneyNodes(snapshot) }
+}
+async function midjourneySettingsSnapshot(panelId, context, snapshot) {
+  const openMarker = midjourneyNode(snapshot, 'aspect-portrait', 'button', false)
+  if (openMarker?.visible) return snapshot
+  const toggle = midjourneyNode(snapshot, 'settings-toggle', 'button')
+  if (!toggle.visible || !toggle.enabled) throw new Error('Midjourney settings control is unavailable')
+  await midjourneyControl(panelId, { op: 'activate', targetId: 'settings-toggle' }, context)
+  await midjourneyControl(panelId, { op: 'waitFor', targetId: 'aspect-portrait', predicate: 'visible', timeoutMs: 5000 }, context)
+  return (await midjourneySnapshot(panelId, context)).snapshot
+}
+function midjourneySettingsEvidence(snapshot) {
+  const selected = (ids) => ids.map(id => midjourneyNode(snapshot, id, 'button', false)).find(node => node?.visible && midjourneyRoleSelected(node))?.id || ''
+  const personalization = midjourneyNode(snapshot, 'personalization-toggle', 'button', false)
+  return {
+    aspect: selected(['aspect-portrait', 'aspect-square', 'aspect-landscape']).replace('aspect-', ''),
+    model: selected(['model-standard', 'model-hd']).replace('model-', ''),
+    raw: selected(['raw-standard', 'raw-on']).replace('raw-on', 'raw').replace('raw-', ''),
+    speed: selected(['speed-relax', 'speed-fast']).replace('speed-', ''),
+    videoResolution: selected(['video-sd', 'video-hd']).replace('video-', ''),
+    personalization: Boolean(personalization?.visible && /\bPersonalize\b/.test(personalization.text))
+  }
+}
+function midjourneyGrid(snapshot) {
+  const image = midjourneyNodes(snapshot).find(node => node.id === 'result-image' && node.role === 'image' && node.visible)
+  return { candidateCount: 0, candidates: [], compositeVisible: Boolean(image) }
+}
+async function probeMidjourneyPanel(panelId) {
+  const { context, snapshot, nodes } = await midjourneySnapshot(panelId)
+  const grid = midjourneyGrid(snapshot)
+  const jobStatus = grid.candidateCount ? 'GRID_READY' : nodes.some(node => node.id === 'submit' && node.visible) ? 'READY' : 'BROWSING'
+  const semanticTrace = Array.isArray(snapshot.semanticTrace) ? snapshot.semanticTrace.slice(0, 120) : []
+  const evidence = { panelId, targetId: context.targetId, url: context.url, nodes, semanticTrace, checkedAt: new Date().toISOString() }
+  return { snapshot: { registryVersion: MIDJOURNEY_SELECTOR_REGISTRY.version, url: context.url, targets: nodes, semanticTrace, jobStatus, grid }, summary: `Midjourney typed snapshot · ${nodes.length} targets`, evidence }
+}
+function formatMidjourneyDraft(prompt, parameters = {}) {
+  const specs = { ar: value => /^\d{1,3}:\d{1,3}$/.test(String(value)), chaos: value => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 100, quality: value => ['.25', '.5', '1', '2'].includes(String(value)), seed: value => /^\d{1,10}$/.test(String(value)), stylize: value => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 1000, weird: value => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 3000, version: value => /^[\w.-]{1,16}$/.test(String(value)), profile: value => /^[\w.-]{1,64}$/.test(String(value)), raw: value => value === true, tile: value => value === true, no: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 500 }
+  const flags = []
+  for (const [key, value] of Object.entries(parameters)) {
+    if (!Object.hasOwn(specs, key) || !specs[key](value)) throw new Error(`Unsupported or invalid Midjourney parameter: ${key}`)
+    flags.push(value === true ? `--${key}` : `--${key} ${String(value).trim()}`)
+  }
+  return `${prompt.trim()}${flags.length ? ` ${flags.join(' ')}` : ''}`
+}
+async function validationFor(panelId, context, snapshot) {
+  const draft = midjourneyDrafts.get(panelId)
+  const attachments = midjourneyAttachments.get(panelId) || []
+  const composer = midjourneyNode(snapshot, 'composer', 'textbox')
+  const settings = ['start-frame', 'image-prompt', 'style-reference', 'omni'].map(id => midjourneyNode(snapshot, id, 'button', false)).filter(Boolean)
+  const exactPrompt = Boolean(draft && draft.text === composer.value && draft.targetId === context.targetId && draft.url === context.url)
+  const roles = attachments.map(item => item.role)
+  const receipt = createId('mjv-')
+  const createdAt = Date.now()
+  const selectedSettings = settings.filter(midjourneyRoleSelected)
+  const evidence = { panelId, targetId: context.targetId, url: context.url, composer: composer.value, exactPrompt, attachmentRoles: roles, settings: settings.map(node => ({ id: node.id, visible: node.visible, enabled: node.enabled, selected: midjourneyRoleSelected(node) })), timestamp: new Date(createdAt).toISOString(), expiresAt: new Date(createdAt + MIDJOURNEY_VALIDATION_TTL_MS).toISOString() }
+  const approved = exactPrompt && midjourneyNode(snapshot, 'submit', null).visible && roles.every(role => selectedSettings.some(node => node.id === role && node.visible)) && selectedSettings.every(node => roles.includes(node.id))
+  const batchFingerprint = await midjourneyPromptHash(JSON.stringify({ panelId, targetId: context.targetId, composer: composer.value, attachmentRoles: roles, settings: selectedSettings.map(node => node.id) }))
+  const validation = { receipt, batchFingerprint, approved, createdAt, expiresAt: createdAt + MIDJOURNEY_VALIDATION_TTL_MS, evidence }
+  boundedMidjourneyLedger(midjourneyValidations, receipt, validation)
+  return validation
+}
+function requireMidjourneyValidation(receipt, batchFingerprint, panelId, context, snapshot) {
+  const validation = midjourneyValidations.get(receipt)
+  const composer = midjourneyNode(snapshot, 'composer', 'textbox')
+  if (!validation || !validation.approved || validation.expiresAt < Date.now() || validation.batchFingerprint !== batchFingerprint ||
+      validation.evidence.panelId !== panelId || validation.evidence.targetId !== context.targetId ||
+      validation.evidence.url !== context.url || validation.evidence.composer !== composer.value) {
+    throw new Error('A fresh matching Midjourney validate receipt is required and batch identity must match')
+  }
+  return validation
+}
+async function runMidjourneyControl(panelId, payload) {
+  let envelope = midjourneyOperation('FAILED')
+  try {
+    if (payload.action === 'capabilities') return { summary: 'Midjourney control capabilities', detail: { ...envelope, state: 'READY', evidence: MIDJOURNEY_CAPABILITIES } }
+    if (payload.action === 'navigate') {
+      const panel = state.browserPanels[panelId]
+      const currentUrl = panel?.url || ''
+      const link = midjourneyLinks.get(panelId)
+      const panelEvidence = restoredProviderEvidence(panel?.providerEvidence)
+      const candidateJobId = link?.jobId || (panelEvidence?.source === 'midjourney' ? panelEvidence.jobId : '')
+      const preserveMidjourneyCandidate = sameMidjourneyCandidateSwitch(currentUrl, payload.url, candidateJobId)
+      if (!preserveMidjourneyCandidate) midjourneyLinks.delete(panelId)
+      setBrowserPanel(panelId, preserveMidjourneyCandidate
+        ? { url: payload.url }
+        : { url: payload.url, qcProfileHint: 'midjourney' }, {
+          preserveMidjourneyCandidate,
+          preserveProviderEvidence: preserveMidjourneyCandidate,
+          preserveQcProfileHint: preserveMidjourneyCandidate
+        })
+      host.panes?.setOpen?.(BROWSER_PANE_ID, true)
+      return { summary: `Navigated ${panelId} to ${payload.url}`, detail: { ...envelope, state: 'NAVIGATING', evidence: { panelId, requestedUrl: payload.url } } }
+    }
+    const { context, snapshot } = await midjourneySnapshot(panelId)
+    if (payload.action === 'probe' || payload.action === 'state') {
+      const probed = await probeMidjourneyPanel(panelId)
+      return { summary: probed.summary, detail: { ...envelope, state: probed.snapshot.jobStatus, evidence: probed.evidence, snapshot: probed.snapshot } }
+    }
+    if (payload.action === 'results') {
+      const resultState = await midjourneyControl(panelId, { op: 'results' }, context)
+      return { summary: 'Midjourney bounded result evidence', detail: { ...envelope, state: 'OBSERVED', evidence: resultState } }
+    }
+    if (payload.action === 'settings') {
+      if (payload.name === 'personalization') {
+        let personalizationSnapshot = snapshot
+        const openSettings = midjourneyNode(personalizationSnapshot, 'aspect-portrait', 'button', false)
+        if (openSettings?.visible) {
+          await midjourneyControl(panelId, { op: 'activate', targetId: 'settings-toggle' }, context)
+          await midjourneyControl(panelId, { op: 'waitFor', targetId: 'personalization-toggle', predicate: 'enabled', timeoutMs: 5000 }, context)
+          personalizationSnapshot = (await midjourneySnapshot(panelId, context)).snapshot
+        }
+        const before = midjourneyNode(personalizationSnapshot, 'personalization-toggle', 'button')
+        if (!before.visible || !before.enabled) throw new Error('Midjourney personalization control is unavailable')
+        const enabled = /\bPersonalize\b/.test(before.text)
+        if (enabled !== payload.value) {
+          if (payload.value) {
+            await midjourneyControl(panelId, { op: 'activate', targetId: 'personalization-toggle' }, context)
+          } else {
+            await midjourneyControl(panelId, { op: 'activate', targetId: 'personalization-menu' }, context)
+            await midjourneyControl(panelId, { op: 'waitFor', targetId: 'personalization-off', predicate: 'enabled', timeoutMs: 5000 }, context)
+            await midjourneyControl(panelId, { op: 'activate', targetId: 'personalization-off' }, context)
+          }
+        }
+        let after = (await midjourneySnapshot(panelId, context)).snapshot
+        const readback = midjourneyNode(after, 'personalization-toggle', 'button')
+        if (/\bPersonalize\b/.test(readback.text) !== payload.value) throw new Error('Midjourney personalization readback failed')
+        if (midjourneyNode(after, 'personalization-off', 'button', false)?.visible) {
+          await midjourneyControl(panelId, { op: 'activate', targetId: 'personalization-menu' }, context)
+          after = (await midjourneySnapshot(panelId, context)).snapshot
+          if (midjourneyNode(after, 'personalization-off', 'button', false)?.visible) throw new Error('Midjourney personalization menu did not close')
+        }
+        return { summary: `Midjourney personalization ${payload.value ? 'on' : 'off'}`, detail: { ...envelope, state: 'SETTINGS', evidence: { panelId, targetId: context.targetId, url: context.url, personalization: payload.value } } }
+      }
+      let current = await midjourneySettingsSnapshot(panelId, context, snapshot)
+      if (!Object.hasOwn(payload, 'name')) {
+        return { summary: 'Midjourney settings readback', detail: { ...envelope, state: 'SETTINGS', evidence: { panelId, targetId: context.targetId, url: context.url, settings: midjourneySettingsEvidence(current) } } }
+      }
+      const optionTargets = {
+        aspect: { portrait: 'aspect-portrait', square: 'aspect-square', landscape: 'aspect-landscape' },
+        model: { standard: 'model-standard', hd: 'model-hd' }, raw: { standard: 'raw-standard', raw: 'raw-on' },
+        speed: { relax: 'speed-relax', fast: 'speed-fast' }, videoResolution: { sd: 'video-sd', hd: 'video-hd' }
+      }
+      const targetId = optionTargets[payload.name]?.[payload.value]
+      if (!targetId) throw new Error('Midjourney setting target is unsupported')
+      const option = midjourneyNode(current, targetId, 'button')
+      if (!option.visible || !option.enabled) throw new Error(`Midjourney setting ${payload.name} is unavailable`)
+      if (!midjourneyRoleSelected(option)) await midjourneyControl(panelId, { op: 'activate', targetId }, context)
+      current = (await midjourneySnapshot(panelId, context)).snapshot
+      const settings = midjourneySettingsEvidence(current)
+      const actual = settings[payload.name]
+      if (actual !== payload.value) throw new Error(`Midjourney setting ${payload.name} readback failed`)
+      return { summary: `Midjourney setting ${payload.name}=${payload.value}`, detail: { ...envelope, state: 'SETTINGS', evidence: { panelId, targetId: context.targetId, url: context.url, settings } } }
+    }
+    if (payload.action === 'grid') {
+      const link = midjourneyLinks.get(panelId)
+      const jobId = midjourneyJobId(context.url)
+      if (!link || !jobId || link.jobId !== jobId) throw new Error('Midjourney grid requires the exact linked current job')
+      const resultState = await midjourneyControl(panelId, { op: 'results' }, context)
+      const currentJob = resultState.currentJob
+      const quadrants = currentJob?.jobId === jobId && Array.isArray(currentJob.compositeGrid?.quadrants)
+        ? currentJob.compositeGrid.quadrants : []
+      const labels = quadrants.map(item => item?.label)
+      if (quadrants.length !== 4 || labels.join('') !== 'ABCD' || quadrants.some(item => !item?.bounds || item.bounds.width <= 0 || item.bounds.height <= 0)) {
+        throw new Error('Midjourney current job does not expose a verified complete A-D grid')
+      }
+      const candidates = quadrants.map((item, index) => ({ candidateId: item.label, ordinal: index + 1, quadrant: item.bounds, sourceKind: 'composite', jobId }))
+      return { summary: 'Midjourney A-D grid verified', detail: { ...envelope, state: 'GRID_READY', evidence: { panelId, targetId: context.targetId, url: context.url, jobId, operationId: link.operationId, promptHash: link.promptHash, candidates } } }
+    }
+    if (payload.action === 'draft') {
+      const text = formatMidjourneyDraft(payload.prompt, payload.parameters || {})
+      await midjourneyControl(panelId, { op: 'focusText', targetId: 'composer', text, replace: true }, context)
+      const after = (await midjourneySnapshot(panelId, context)).snapshot
+      if (midjourneyNode(after, 'composer', 'textbox').value !== text) throw new Error('Midjourney composer readback did not match the requested draft')
+      boundedMidjourneyLedger(midjourneyDrafts, panelId, { targetId: context.targetId, url: context.url, text, setAt: new Date().toISOString() })
+      return { summary: `Draft set (${text.length} characters)`, detail: { ...envelope, state: 'DRAFT', evidence: { panelId, targetId: context.targetId, url: context.url, composer: text } } }
+    }
+    if (payload.action === 'attach') {
+      const role = payload.role === 'omni-reference' ? 'omni' : payload.role
+      let current = snapshot
+      const modeSwitch = role === 'start-frame' ? 'switch-to-video' : 'switch-to-image'
+      const existingInput = midjourneyNode(current, 'image-file-input', null, false)
+      if (!existingInput) {
+        const opener = {
+          'image-prompt': 'add-images',
+          'start-frame': 'add-start-frame',
+          'style-reference': 'add-style-reference',
+          omni: 'add-omni-reference'
+        }[role]
+        const add = midjourneyNode(current, opener, 'button')
+        if (!add.visible || !add.enabled) throw new Error(`Midjourney ${role} attachment control is unavailable`)
+        await midjourneyControl(panelId, { op: 'activate', targetId: opener }, context)
+        await midjourneyControl(panelId, { op: 'waitFor', targetId: 'image-file-input', predicate: 'enabled', timeoutMs: 5000 }, context)
+        current = (await midjourneySnapshot(panelId, context)).snapshot
+      }
+      const requestedMode = role === 'start-frame' ? 'video' : 'image'
+      if (current.composerMode !== requestedMode) {
+        const switchNode = midjourneyNode(current, modeSwitch, 'button', false)
+        if (!switchNode?.visible || !switchNode.enabled) throw new Error(`Midjourney ${requestedMode} composer mode is not positively available`)
+        await midjourneyControl(panelId, { op: 'activate', targetId: modeSwitch }, context)
+        current = (await midjourneySnapshot(panelId, context)).snapshot
+      }
+      if (current.composerMode !== requestedMode) throw new Error(`Midjourney ${requestedMode} composer mode readback failed`)
+      const beforeRoles = selectedMidjourneyRoles(current)
+      if (beforeRoles.length) throw new Error(`Midjourney attachment precondition is not empty: ${beforeRoles.join(', ')}`)
+      const input = midjourneyNode(current, 'image-file-input', null)
+      if (!input.enabled) throw new Error('Midjourney image file input is unavailable')
+      await midjourneyControl(panelId, { op: 'setFileInput', targetId: 'image-file-input', filePath: payload.path }, context)
+      const roleDeadline = Date.now() + 10000
+      do {
+        current = (await midjourneySnapshot(panelId, context)).snapshot
+        const requestedRole = midjourneyNode(current, role, 'button', false)
+        if (requestedRole && midjourneyRoleSelected(requestedRole)) break
+        await new Promise(resolve => setTimeout(resolve, 250))
+      } while (Date.now() <= roleDeadline)
+      await midjourneyControl(panelId, { op: 'waitFor', targetId: role, predicate: 'visible', timeoutMs: 10000 }, context)
+      current = (await midjourneySnapshot(panelId, context)).snapshot
+      const selectedRoles = selectedMidjourneyRoles(current)
+      if (selectedRoles.length !== 1 || selectedRoles[0] !== role) throw new Error(`Midjourney attachment roles did not read back exactly: ${selectedRoles.join(', ') || 'none'}`)
+      const roleNode = midjourneyNode(current, role, 'button')
+      if (!roleNode.visible || !roleNode.enabled || !midjourneyRoleSelected(roleNode)) throw new Error(`Midjourney attachment role ${role} was not verified`)
+      const readback = { roleControl: roleNode.text, confirmed: midjourneyRoleSelected(roleNode) }
+      if (!readback.confirmed) throw new Error(`Midjourney attachment role ${role} readback did not confirm selection`)
+      const attachments = [...(midjourneyAttachments.get(panelId) || []).filter(item => item.role !== role), { role, targetId: context.targetId, url: context.url, attachedAt: new Date().toISOString() }].slice(-4)
+      boundedMidjourneyLedger(midjourneyAttachments, panelId, attachments)
+      return { summary: `Attached image as ${role}`, detail: { ...envelope, state: 'READY', evidence: { panelId, targetId: context.targetId, url: context.url, attachmentRoles: attachments.map(item => item.role), roleReadback: readback } } }
+    }
+    if (payload.action === 'detach') {
+      const role = payload.role === 'omni-reference' ? 'omni' : payload.role
+      const selectedRoles = selectedMidjourneyRoles(snapshot)
+      if (selectedRoles.length !== 1 || selectedRoles[0] !== role) throw new Error(`Midjourney ${role} is not the sole selected attachment role`)
+      const clear = midjourneyNode(snapshot, role, 'button')
+      if (!clear.visible || !clear.enabled || !/^Clear\b/.test(clear.text)) throw new Error(`Midjourney ${role} has no exact typed clear action`)
+      await midjourneyControl(panelId, { op: 'activate', targetId: role }, context)
+      const deadline = Date.now() + 5000
+      let after = snapshot
+      do {
+        after = (await midjourneySnapshot(panelId, context)).snapshot
+        if (!selectedMidjourneyRoles(after).length) break
+        await new Promise(resolve => setTimeout(resolve, 250))
+      } while (Date.now() <= deadline)
+      if (selectedMidjourneyRoles(after).length) throw new Error(`Midjourney ${role} cleanup readback failed`)
+      boundedMidjourneyLedger(midjourneyAttachments, panelId, (midjourneyAttachments.get(panelId) || []).filter(item => item.role !== role))
+      return { summary: `Detached ${role}`, detail: { ...envelope, state: 'READY', evidence: { panelId, targetId: context.targetId, url: context.url, attachmentRoles: [] } } }
+    }
+    if (payload.action === 'validate') {
+      const validation = await validationFor(panelId, context, snapshot)
+      return { summary: validation.approved ? 'Midjourney draft is submit-ready' : 'Midjourney draft is not submit-ready', receiptContext: { receiptHash: await midjourneyPromptHash(validation.receipt), batchContextId: validation.batchFingerprint, expiresAt: validation.evidence.expiresAt, batchFingerprint: validation.batchFingerprint }, detail: { ...envelope, state: validation.approved ? 'READY' : 'FAILED', evidence: validation.evidence, validation } }
+    }
+    if (payload.action === 'link') {
+      const resultState = await midjourneyControl(panelId, { op: 'results' }, context)
+      const requestedPrompt = normalizedMidjourneyPrompt(payload.prompt)
+      const requestedJobId = String(payload.jobId).toLowerCase()
+      const submittedAt = Date.parse(payload.ledgerCreatedAt)
+      const latestAt = submittedAt + 30 * 60_000
+      const matches = (Array.isArray(resultState.results) ? resultState.results : []).filter(result => {
+        const createdAt = Date.parse(result?.createdAt || '')
+        return /^[0-9a-f-]{36}$/i.test(String(result?.jobId || '')) &&
+          String(result.jobId).toLowerCase() === requestedJobId &&
+          (!result?.prompt || normalizedMidjourneyPromptBody(result.prompt) === normalizedMidjourneyPromptBody(requestedPrompt)) &&
+          (!result?.createdAt || Number.isFinite(createdAt) && createdAt >= submittedAt - 5000 && createdAt <= latestAt)
+      })
+      if (matches.length !== 1) throw new Error(`Midjourney acknowledged submit linkage is ${matches.length ? 'ambiguous' : 'unavailable'}`)
+      const linked = matches[0]
+      const promptHash = await midjourneyPromptHash(requestedPrompt)
+      const record = { jobId: requestedJobId, operationId: payload.operationId, promptHash, submittedAt: payload.ledgerCreatedAt, providerCreatedAt: linked.createdAt, linkedAt: new Date().toISOString() }
+      boundedMidjourneyLedger(midjourneyLinks, panelId, record)
+      const requestedUrl = `https://www.midjourney.com/jobs/${record.jobId}`
+      setBrowserPanel(panelId, {
+        url: requestedUrl, qcProfileHint: 'midjourney',
+        providerEvidence: { source: 'midjourney', jobId: record.jobId, operationId: record.operationId, resultUrl: requestedUrl }
+      })
+      host.panes?.setOpen?.(BROWSER_PANE_ID, true)
+      return { summary: `Linked Midjourney job ${record.jobId}`, detail: { ...envelope, state: 'NAVIGATING', evidence: { panelId, sourceTargetId: context.targetId, sourceUrl: context.url, requestedUrl, ...record } } }
+    }
+    if (payload.action === 'submit' || payload.action === 'action') {
+      const name = payload.action === 'submit' ? 'submit' : payload.name
+      if (name !== 'select' && payload.approved !== true) throw new Error(`${name} requires approved=true`)
+      if (payload.action === 'submit') requireMidjourneyValidation(payload.validateReceipt, payload.batchFingerprint, panelId, context, snapshot)
+      if (payload.action === 'action') {
+        const link = midjourneyLinks.get(panelId)
+        const currentJobId = midjourneyJobId(context.url)
+        if (!link || !currentJobId || link.jobId !== currentJobId || payload.jobId.toLowerCase() !== currentJobId) throw new Error('Midjourney result action requires the exact linked current job')
+      }
+      const target = name
+      const node = midjourneyNode(snapshot, target, target === 'submit' ? null : 'button')
+      if (!node.visible || !node.enabled) throw new Error(`Midjourney ${target} control is unavailable`)
+      const activation = { op: 'activate', targetId: target }
+      if (payload.action === 'action' && payload.candidate) activation.candidate = payload.candidate
+      await midjourneyControl(panelId, activation, context)
+      return { summary: `${name} activated once`, detail: { ...envelope, state: name === 'submit' ? 'SUBMITTED' : 'MUTATED', evidence: { panelId, targetId: context.targetId, url: context.url, jobId: payload.jobId || '', candidate: payload.candidate || '', action: name, idempotencyKey: payload.idempotencyKey } } }
+    }
+    if (payload.action === 'wait') {
+      const timeoutMs = Math.min(payload.timeoutMs || 5000, MIDJOURNEY_WAIT_MAX_MS)
+      const link = midjourneyLinks.get(panelId)
+      const jobId = midjourneyJobId(context.url)
+      if (!link || !jobId || link.jobId !== jobId) throw new Error('Midjourney wait requires the exact linked current job')
+      const result = await midjourneyControl(panelId, { op: 'waitFor', targetId: 'result-image', predicate: 'visible', timeoutMs }, context)
+      return { summary: 'Midjourney result state observed', detail: { ...envelope, state: 'RESULT_READY', evidence: { panelId, targetId: context.targetId, url: context.url, jobId, timeoutMs, result: result.node || null } } }
+    }
+    if (payload.action === 'download') {
+      const jobId = payload.jobId
+      const filename = payload.filename
+      const currentJobId = midjourneyJobId(context.url)
+      const link = midjourneyLinks.get(panelId)
+      if (!currentJobId || currentJobId !== jobId.toLowerCase() || link?.jobId !== currentJobId) throw new Error('Midjourney download job does not match the exact linked current page')
+      const safe = `midjourney/${jobId}/${filename}`
+      if (!/^midjourney\/[A-Za-z0-9_-]{1,80}\/[A-Za-z0-9._-]{1,120}\.(?:png|jpe?g|webp|gif|avif|bmp)$/i.test(safe)) throw new Error('Midjourney download artifact path is unsafe')
+      const result = await midjourneyControl(panelId, { op: 'download', targetId: 'result-image', artifactRelativePath: safe }, context)
+      if (!/^image\//i.test(result.mime || '') || !Number.isFinite(result.bytes) || result.bytes <= 0 || !Number.isFinite(result.width) || result.width <= 0 || !Number.isFinite(result.height) || result.height <= 0) throw new Error('Midjourney download did not return verified image provenance')
+      return { summary: `Downloaded ${filename}`, detail: { ...envelope, state: 'DOWNLOADED', evidence: { panelId, targetId: context.targetId, url: context.url, jobId, artifactRelativePath: safe, artifact: result } } }
+    }
+    if (payload.action === 'capture') {
+      const captured = await captureBrowserPanel(panelId)
+      return { summary: `Captured ${captured.width}×${captured.height}`, detail: { ...envelope, state: 'CAPTURED', evidence: { panelId, targetId: context.targetId, url: context.url, capture: captured } } }
+    }
+    if (payload.action === 'qc') return { summary: 'Midjourney QC state', detail: { ...envelope, state: 'QC_RUNNING', evidence: { panelId, targetId: context.targetId, url: context.url, qc: agentStatusSnapshot(state) } } }
+    throw new Error(`Unsupported Midjourney control action: ${payload.action}`)
+  } catch (error) {
+    envelope = { ...envelope, error: midjourneyError(error) }
+    throw new Error(envelope.error)
+  }
 }
 
 async function runDesignPageChecks(panelId) {
@@ -1106,6 +1880,8 @@ async function dispatchAgentCommand(ctx, received, seenIds) {
   let ok = false
   let summary = ''
   let error = ''
+  let detail = null
+  let receiptContext = null
   try {
     if (!commandId || seenIds.has(commandId)) throw new Error(commandId ? 'Duplicate command id' : 'Command id is required')
     seenIds.add(commandId)
@@ -1120,6 +1896,20 @@ async function dispatchAgentCommand(ctx, received, seenIds) {
           ? await inspectBrowserPanel(command.panelId)
           : await runDesignPageChecks(command.panelId)
       summary = typeof result === 'string' ? result : command.op === 'capture' ? `Captured ${command.panelId}` : command.op
+    } else if (command.op === 'midjourney-probe') {
+      const result = await probeMidjourneyPanel(command.panelId)
+      summary = result.summary
+      detail = { ...midjourneyOperation(result.snapshot.jobStatus, result.evidence), snapshot: result.snapshot }
+    } else if (command.op === 'midjourney-control') {
+      const result = await runMidjourneyControl(command.panelId, command.payload)
+      summary = result.summary
+      detail = result.detail
+      receiptContext = result.receiptContext || null
+    } else if (command.op === 'higgsfield-control') {
+      const result = await runHiggsfieldControl(command.panelId, command.payload)
+      summary = result.summary
+      detail = result.detail
+      receiptContext = result.receiptContext || null
     } else if (command.op === 'import-qc') {
       if (!reviewContextMatches(state, state.qcProfile)) throw new Error('Link the target in the Browser pane before editing QC')
       const provider = providerForProfile(state.qcProfile)
@@ -1139,12 +1929,13 @@ async function dispatchAgentCommand(ctx, received, seenIds) {
     }
     ok = true
   } catch (caught) {
-    error = caught instanceof Error ? caught.message : String(caught)
+    error = midjourneyError(caught)
+    if (op === 'midjourney-control' || op === 'midjourney-probe') detail = midjourneyOperation('FAILED', {}, error)
   }
   const message = ok ? summary : error
   setState({ agentActivity: { op, at: new Date().toISOString(), ok, summary: message } })
   host.notify({ kind: ok ? 'success' : 'warning', message: `Agent QC · ${op} — ${message}` })
-  const ack = { id: commandId, ok, error: ok ? '' : error, summary: message, state: agentStatusSnapshot(state) }
+  const ack = { id: commandId, ok, error: ok ? '' : error, summary: message, ...(detail ? { detail } : {}), ...(receiptContext ? { receiptContext } : {}), state: agentStatusSnapshot(state) }
   try {
     await ctx.rest('/result', { method: 'POST', body: ack })
   } catch (postError) {
@@ -1274,8 +2065,11 @@ function BrowserSurface({ panelId, url, viewport }) {
             const nextUrl = String(event?.url || element.getURL?.() || '')
             const currentUrl = state.browserPanels[panelId]?.url || ''
             if (nextUrl && nextUrl !== currentUrl) {
-              const preserveProvenance = comparableUrl(nextUrl) === comparableUrl(currentUrl)
+              const link = midjourneyLinks.get(panelId)
+              const preserveMidjourneyCandidate = sameMidjourneyCandidateSwitch(currentUrl, nextUrl, link?.jobId)
+              const preserveProvenance = preserveMidjourneyCandidate || comparableUrl(nextUrl) === comparableUrl(currentUrl)
               setBrowserPanel(panelId, { url: nextUrl }, {
+                preserveMidjourneyCandidate,
                 preserveProviderEvidence: preserveProvenance,
                 preserveQcProfileHint: preserveProvenance
               })
@@ -1635,7 +2429,9 @@ function QcTargetCard({ workbench }) {
   const panel = workbench.browserPanels[panelId] || DEFAULT_BROWSER_PANELS[panelId]
   const viewport = viewportFor(panel)
   const hasTarget = Boolean(panel.url)
-  const linkedCapture = workbench.capture?.panelId === panelId && workbench.capture?.targetId === panel.targetId
+  const linkedCapture = workbench.capture?.panelId === panelId && workbench.capture?.targetId === panel.targetId &&
+    workbench.capture?.url === panel.url &&
+    JSON.stringify(workbench.capture?.viewport) === JSON.stringify(viewportFor(panel))
     ? workbench.capture
     : null
   const [status, setStatus] = useState('')
@@ -1820,7 +2616,9 @@ function QcReadinessCard({ workbench, profileId, provider }) {
   const panelId = workbench.qcTargetPanelId || 'result'
   const panel = workbench.browserPanels[panelId] || DEFAULT_BROWSER_PANELS[panelId]
   const hasTarget = Boolean(panel.url)
-  const hasCapture = Boolean(workbench.capture?.panelId === panelId && workbench.capture?.targetId === panel.targetId)
+  const hasCapture = Boolean(workbench.capture?.panelId === panelId && workbench.capture?.targetId === panel.targetId &&
+    workbench.capture?.url === panel.url &&
+    JSON.stringify(workbench.capture?.viewport) === JSON.stringify(viewportFor(panel)))
   const hasInspection = Boolean(panel.inspection?.checkedAt && comparableUrl(panel.inspection.url) === comparableUrl(panel.url))
   const hasReviewContext = reviewContextMatches(workbench, profileId)
   const providerEvidence = hasReviewContext ? workbench.reviewContext.providerEvidence : null
@@ -1870,10 +2668,10 @@ function QcReadinessCard({ workbench, profileId, provider }) {
         detail: hasInspection ? panel.inspection.summary : 'Inspect the live Browser guest and viewport.'
       }) : null,
       isHiggsfield ? jsx(ReadinessRow, {
-        label: 'MCP metadata', value: providerEvidence ? 'LINKED' : 'NOT LINKED', variant: providerEvidence ? 'default' : 'warn',
+        label: 'Provider metadata', value: providerEvidence ? 'LINKED' : 'NOT LINKED', variant: providerEvidence ? 'default' : 'warn',
         detail: providerEvidence
           ? [providerEvidence.jobId || 'job id unavailable', providerEvidence.model || 'model unavailable', providerEvidence.soulId ? `Soul ${providerEvidence.soulId}` : ''].filter(Boolean).join(' · ')
-          : 'Open the asset from a Higgsfield MCP tool result to bind job, model, prompt, and output settings.'
+          : 'Bind provenance from the Higgsfield CLI bridge or a Higgsfield tool result to attach job, model, prompt, and output settings.'
       }) : null,
       providerEvidence ? jsxs('div', { style: { padding: '8px 0 2px' }, children: [
         jsxs('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 5 }, children: [
@@ -2198,7 +2996,9 @@ function QcPane() {
   const targetPanel = workbench.browserPanels[targetPanelId] || DEFAULT_BROWSER_PANELS.result
   const hasResult = Boolean(targetPanel.url)
   const hasReference = Boolean(workbench.browserPanels.reference.url)
-  const hasCapture = workbench.capture?.panelId === targetPanelId && workbench.capture?.targetId === targetPanel.targetId
+  const hasCapture = workbench.capture?.panelId === targetPanelId && workbench.capture?.targetId === targetPanel.targetId &&
+    workbench.capture?.url === targetPanel.url &&
+    JSON.stringify(workbench.capture?.viewport) === JSON.stringify(viewportFor(targetPanel))
 
   return jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
@@ -2234,14 +3034,15 @@ export default {
   version: PLUGIN_VERSION,
   register(ctx) {
     pluginContext = ctx
+    const savedV7 = ctx.storage.get('workbench.v7', null)
     const savedV6 = ctx.storage.get('workbench.v6', null)
     const savedV5 = ctx.storage.get('workbench.v5', null)
     const savedV4 = ctx.storage.get('workbench.v4', null)
     const savedV3 = ctx.storage.get('workbench.v3', null)
     const savedV2 = ctx.storage.get('workbench.v2', null)
     const savedV1 = ctx.storage.get('workbench.v1', DEFAULT_STATE)
-    state = restoredState(savedV6 || savedV5 || savedV4 || savedV3 || savedV2 || savedV1)
-    ctx.storage.set('workbench.v6', persistedState())
+    state = restoredState(savedV7 || savedV6 || savedV5 || savedV4 || savedV3 || savedV2 || savedV1)
+    ctx.storage.set('workbench.v7', persistedState())
     const seenAgentCommandIds = new Set()
     ctx.socket('/commands', received => { void dispatchAgentCommand(ctx, received, seenAgentCommandIds) })
 

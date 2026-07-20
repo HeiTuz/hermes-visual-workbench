@@ -1,4 +1,4 @@
-export const PERSISTED_SCHEMA_VERSION = 6
+export const PERSISTED_SCHEMA_VERSION = 7
 export const QC_DOCUMENT_SCHEMA_VERSION = 1
 export const MAX_QC_JSON_BYTES = 64 * 1024
 export const CANDIDATE_IDS = Object.freeze(['A', 'B', 'C', 'D'])
@@ -74,6 +74,40 @@ function isRecord(value) {
 
 function boundedMetadataString(value, max = 4000) {
   return typeof value === 'string' ? value.slice(0, max) : ''
+}
+const URL_SECRET_PARAM = /token|sig|signature|expires|apikey|accesskey|keypair|auth|secret|credential|session|cookie|password|(?:^|[^a-z])key(?:$|[^a-z])/i
+
+export function sanitizeUrl(value) {
+  const raw = boundedMetadataString(value, 4096)
+  if (!raw) return ''
+  try {
+    const url = new URL(raw)
+    for (const key of [...url.searchParams.keys()]) {
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '')
+      if (URL_SECRET_PARAM.test(normalized)) url.searchParams.delete(key)
+    }
+    if (['http:', 'https:'].includes(url.protocol)) {
+      const path = url.pathname === '/' ? '' : url.pathname
+      const base = `${url.protocol}//${url.hostname}${path}`
+      return url.searchParams.size ? `${base}?${url.searchParams}` : base
+    }
+    if (!['file:', 'data:'].includes(url.protocol)) return ''
+    url.username = ''
+    url.password = ''
+    url.hash = ''
+    return url.toString()
+  } catch {
+    return ''
+  }
+}
+
+// Mandatory gate for any future Higgsfield provider invocation.
+export async function invokeHiggsfieldReadOnly(toolName, invoke, ...args) {
+  const operation = String(toolName || '').toLowerCase().replace(/^.*__/, '')
+  if (!['show_generations', 'job_status', 'get_generation', 'get_job', 'inspect', 'status'].includes(operation)) {
+    throw new Error(`Higgsfield operation ${operation || 'unknown'} is read-only only`)
+  }
+  return invoke(toolName, ...args)
 }
 
 function parsedRecord(value) {
@@ -152,14 +186,23 @@ function comparableUrl(value) {
 }
 
 export function restoredProviderEvidence(value) {
-  if (!isRecord(value) || value.source !== 'higgsfield-mcp') return null
+  if (!isRecord(value)) return null
+  if (value.source === 'midjourney') {
+    const jobId = boundedMetadataString(value.jobId, 128).toLowerCase()
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId)) return null
+    return {
+      source: 'midjourney', jobId, operationId: boundedMetadataString(value.operationId, 128),
+      resultUrl: sanitizeUrl(value.resultUrl)
+    }
+  }
+  if (!['higgsfield-mcp', 'higgsfield-web'].includes(value.source)) return null
   const width = Number.isFinite(value.width) && value.width > 0 ? Math.round(value.width) : 0
   const height = Number.isFinite(value.height) && value.height > 0 ? Math.round(value.height) : 0
   const duration = Number.isFinite(value.duration) && value.duration > 0 ? value.duration : 0
   const count = Number.isInteger(value.count) && value.count > 0 ? Math.min(value.count, 20) : 1
   const referenceCount = Number.isInteger(value.referenceCount) && value.referenceCount >= 0 ? Math.min(value.referenceCount, 20) : 0
   return {
-    source: 'higgsfield-mcp',
+    source: value.source,
     jobId: boundedMetadataString(value.jobId, 128),
     status: boundedMetadataString(value.status, 64),
     model: boundedMetadataString(value.model, 128),
@@ -173,13 +216,42 @@ export function restoredProviderEvidence(value) {
     resolution: boundedMetadataString(value.resolution, 32),
     count,
     referenceCount,
-    resultUrl: boundedMetadataString(value.resultUrl, 4096),
+    resultUrl: sanitizeUrl(value.resultUrl),
     createdAt: typeof value.createdAt === 'string' || Number.isFinite(value.createdAt) ? value.createdAt : '',
     checkedAt: boundedMetadataString(value.checkedAt, 64)
   }
 }
 export function providerEvidenceIdentity(evidence) {
-  return evidence ? `${evidence.jobId}|${evidence.resultUrl}|${evidence.model}` : ''
+  return evidence ? [
+    evidence.source, evidence.jobId, evidence.resultUrl, evidence.model,
+    evidence.status, evidence.aspectRatio
+  ].join('|') : ''
+}
+export function midjourneyJobLocation(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ''))
+    const match = url.protocol === 'https:' && !url.username && !url.password && url.port === '' &&
+      /^(?:www\.)?midjourney\.com$/.test(url.hostname.toLowerCase()) &&
+      url.pathname.match(/^\/jobs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i)
+    const candidateIndex = match && url.search === '' && url.hash === ''
+      ? -1
+      : match && url.hash === '' && /^index=[0-3]$/.test(url.search.slice(1)) ? Number(url.search.slice(-1)) : null
+    return { jobId: match?.[1]?.toLowerCase() || '', candidateIndex }
+  } catch { return { jobId: '', candidateIndex: null } }
+}
+export function midjourneyProviderEvidenceForUrl(rawUrl) {
+  const location = midjourneyJobLocation(rawUrl)
+  return location.jobId && location.candidateIndex !== null
+    ? restoredProviderEvidence({ source: 'midjourney', jobId: location.jobId, resultUrl: String(rawUrl) })
+    : null
+}
+
+export function sameMidjourneyCandidateSwitch(previousUrl, nextUrl, linkedJobId) {
+  const previous = midjourneyJobLocation(previousUrl)
+  const next = midjourneyJobLocation(nextUrl)
+  return Boolean(linkedJobId && previous.jobId === String(linkedJobId).toLowerCase() &&
+    next.jobId === previous.jobId && previous.candidateIndex !== null &&
+    Number.isInteger(next.candidateIndex) && next.candidateIndex >= 0 && previous.candidateIndex !== next.candidateIndex)
 }
 
 export function providerEvidenceFor(input = {}) {
@@ -187,12 +259,10 @@ export function providerEvidenceFor(input = {}) {
   if (!toolName.includes('higgsfield')) return null
   const records = providerRecords(input.toolResult)
   const src = String(input.src || '')
-  const matching = records.filter(record => resultUrls(record).some(url => comparableUrl(url) === comparableUrl(src)))
-  const recordsWithUrls = records.filter(record => resultUrls(record).length > 0)
-  const record = matching[0] || (recordsWithUrls.length === 0 && records.length === 1 ? records[0] : null)
-  if (!record) return null
+  const matching = records.filter(record => resultUrls(record).some(url => url === src))
+  if (matching.length !== 1) return null
+  const record = matching[0]
   const params = isRecord(record.params) ? record.params : {}
-  const urls = resultUrls(record)
   const mediaType = ['image', 'video', 'audio', '3d'].includes(record.type)
     ? record.type
     : /\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) ? 'video' : 'image'
@@ -211,7 +281,7 @@ export function providerEvidenceFor(input = {}) {
     resolution: params.resolution || record.resolution || '',
     count: params.batch_size || params.count || record.count || 1,
     referenceCount: Array.isArray(params.medias) ? params.medias.length : 0,
-    resultUrl: urls.find(url => comparableUrl(url) === comparableUrl(src)) || urls[0] || src,
+    resultUrl: src,
     createdAt: record.createdAt || record.created_at || '',
     checkedAt: new Date().toISOString()
   })
@@ -220,7 +290,7 @@ export function providerEvidenceFor(input = {}) {
 function restoredInspection(value) {
   if (!isRecord(value)) return null
   return {
-    url: boundedMetadataString(value.url, 4096),
+    url: sanitizeUrl(value.url),
     summary: boundedMetadataString(value.summary, 1000),
     checkedAt: boundedMetadataString(value.checkedAt, 64)
   }
@@ -231,7 +301,7 @@ function restoredReviewContext(value, panels, allowLegacy = false) {
   const panel = panels[value.panelId]
   const legacy = !Object.hasOwn(value, 'contextId')
   if (legacy) {
-    const url = boundedMetadataString(value.url, 4096)
+    const url = sanitizeUrl(value.url)
     if (!allowLegacy || !url || !panel?.url || url !== panel.url) return null
     return {
       contextId: createId('c'), panelId: value.panelId, targetId: panel.targetId, profileId: value.profileId,
@@ -244,7 +314,7 @@ function restoredReviewContext(value, panels, allowLegacy = false) {
       !isRecord(value.viewport) || typeof value.stale !== 'boolean' ||
       !['', 'url-changed', 'viewport-changed', 'panels-swapped', 'provenance-changed', 'load-failed'].includes(value.staleReason) ||
       typeof value.linkedAt !== 'string' || value.linkedAt.length > 64) return null
-  const url = boundedMetadataString(value.url, 4096)
+  const url = sanitizeUrl(value.url)
   const viewport = value.viewport
   if (!url || !Number.isFinite(viewport.width) || viewport.width < 240 || !Number.isFinite(viewport.height) ||
       viewport.height < 240 || typeof viewport.preset !== 'string' || typeof viewport.responsive !== 'boolean') return null
@@ -280,29 +350,34 @@ export function panelLinkedToQc(current, panelId) {
 export function updatePanelState(state, panelId, patch, options = {}, makeId = createId) {
   const panel = state.browserPanels[panelId]
   if (!panel) return state
-  const { preserveQcProfileHint = false, preserveProviderEvidence = false } = options
+  const { preserveQcProfileHint = false, preserveProviderEvidence = false, preserveMidjourneyCandidate = false } = options
   const urlChanged = Object.hasOwn(patch, 'url') && patch.url !== panel.url
-  const nextUrl = Object.hasOwn(patch, 'url') ? patch.url : panel.url
+  const nextUrl = Object.hasOwn(patch, 'url') ? sanitizeUrl(patch.url) : panel.url
   const viewportChanged = ['preset', 'width', 'height'].some(key => Object.hasOwn(patch, key) && patch[key] !== panel[key])
   const provenanceChanged = Object.hasOwn(patch, 'providerEvidence') &&
     providerEvidenceIdentity(patch.providerEvidence) !== providerEvidenceIdentity(panel.providerEvidence)
-  const targetChanged = urlChanged || (viewportChanged && mediaKind(nextUrl) === 'page') || provenanceChanged
+  const candidateSwitch = urlChanged && preserveMidjourneyCandidate
+  const targetChanged = !candidateSwitch && (urlChanged || (viewportChanged && mediaKind(nextUrl) === 'page') || provenanceChanged)
   const staleReason = urlChanged ? 'url-changed' : viewportChanged ? 'viewport-changed' : 'provenance-changed'
   const nextPanel = {
     ...panel, ...patch,
+    ...(Object.hasOwn(patch, 'url') ? { url: nextUrl } : {}),
+    ...(Object.hasOwn(patch, 'providerEvidence') ? { providerEvidence: restoredProviderEvidence(patch.providerEvidence) } : {}),
     ...(targetChanged ? { targetId: makeId('t'), inspection: null } : {}),
     ...(urlChanged && !preserveQcProfileHint && !Object.hasOwn(patch, 'qcProfileHint') ? { qcProfileHint: '' } : {}),
     ...(urlChanged && !preserveProviderEvidence && !Object.hasOwn(patch, 'providerEvidence') ? { providerEvidence: null } : {})
   }
   const context = state.reviewContext
-  const reviewContext = targetChanged && context?.panelId === panelId && context.targetId === panel.targetId
-    ? { ...context, stale: true, staleReason }
-    : context
+  const reviewContext = candidateSwitch && context?.panelId === panelId && context.targetId === panel.targetId && !context.stale
+    ? { ...context, url: nextUrl, mediaKind: mediaKind(nextUrl), viewport: viewportFor(nextPanel), linkedAt: new Date().toISOString() }
+    : targetChanged && context?.panelId === panelId && context.targetId === panel.targetId
+      ? { ...context, stale: true, staleReason }
+      : context
   return {
     ...state,
     browserPanels: { ...state.browserPanels, [panelId]: nextPanel },
     reviewContext,
-    ...(targetChanged && state.capture?.panelId === panelId ? { capture: null } : {})
+    ...((targetChanged || candidateSwitch) && state.capture?.panelId === panelId ? { capture: null } : {})
   }
 }
 
@@ -312,17 +387,24 @@ export function linkPanelState(state, panelId, input = {}, makeId = createId) {
   const profileId = QC_PROFILE_IDS.includes(input.profileId)
     ? input.profileId
     : QC_PROFILE_IDS.includes(panel.qcProfileHint) ? panel.qcProfileHint : 'design'
+  const inferredProviderEvidence = profileId === 'midjourney' ? midjourneyProviderEvidenceForUrl(panel.url) : null
+  const providerEvidence = profileId === 'midjourney' ? inferredProviderEvidence : restoredProviderEvidence(panel.providerEvidence)
+  const nextPanel = profileId === 'midjourney' && providerEvidenceIdentity(providerEvidence) !== providerEvidenceIdentity(panel.providerEvidence)
+    ? { ...panel, providerEvidence }
+    : panel
   const previous = state.reviewContext
   const same = previous && !previous.stale && previous.panelId === panelId &&
-    previous.targetId === panel.targetId && previous.profileId === profileId
+    previous.targetId === panel.targetId && previous.profileId === profileId &&
+    providerEvidenceIdentity(previous.providerEvidence) === providerEvidenceIdentity(providerEvidence)
   const reviewContext = same ? previous : {
     contextId: input.contextId || makeId('c'), panelId, targetId: panel.targetId, profileId, url: panel.url,
-    mediaKind: mediaKind(panel.url), viewport: viewportFor(panel),
-    providerEvidence: restoredProviderEvidence(panel.providerEvidence), linkedAt: input.linkedAt || new Date().toISOString(),
+    mediaKind: mediaKind(panel.url), viewport: viewportFor(nextPanel),
+    providerEvidence, linkedAt: input.linkedAt || new Date().toISOString(),
     stale: false, staleReason: ''
   }
   return {
     ...state,
+    browserPanels: nextPanel === panel ? state.browserPanels : { ...state.browserPanels, [panelId]: nextPanel },
     browserSplit: panelId === 'reference' ? true : state.browserSplit,
     qcProfile: profileId, qcTargetPanelId: panelId, reviewContext,
     ...(same ? {} : {
@@ -355,7 +437,11 @@ export function markPanelLoadFailedState(state, panelId) {
   const panel = state.browserPanels[panelId]
   const context = state.reviewContext
   if (!panel || !context || context.stale || context.panelId !== panelId || context.targetId !== panel.targetId) return state
-  return { ...state, reviewContext: { ...context, stale: true, staleReason: 'load-failed' } }
+  return {
+    ...state,
+    reviewContext: { ...context, stale: true, staleReason: 'load-failed' },
+    ...(state.capture?.panelId === panelId ? { capture: null } : {})
+  }
 }
 
 function restoredDimension(value) {
@@ -396,7 +482,7 @@ function restoredJob(value) {
 function restoredPanel(value, defaults, legacyUrl = '') {
   const source = isRecord(value) ? value : {}
   return {
-    url: typeof source.url === 'string' ? source.url : legacyUrl,
+    url: sanitizeUrl(typeof source.url === 'string' ? source.url : legacyUrl),
     targetId: validId(source.targetId, 't') ? source.targetId : createId('t'),
     preset: typeof source.preset === 'string' ? source.preset : defaults.preset,
     width: Number.isFinite(source.width) && source.width >= 240 ? source.width : defaults.width,
@@ -427,9 +513,13 @@ function restoredCapture(value) {
   if (!isRecord(value) || !['result', 'reference'].includes(value.panelId) || !validId(value.targetId, 't')) return null
   if (!Number.isInteger(value.width) || value.width <= 0 || !Number.isInteger(value.height) || value.height <= 0) return null
   if (typeof value.path !== 'string' || !value.path) return null
+  const viewport = isRecord(value.viewport) && Number.isFinite(value.viewport.width) && Number.isFinite(value.viewport.height)
+    ? { preset: String(value.viewport.preset || ''), width: Math.round(value.viewport.width), height: Math.round(value.viewport.height), responsive: value.viewport.responsive === true }
+    : undefined
   return {
-    panelId: value.panelId, targetId: value.targetId, url: typeof value.url === 'string' ? value.url : '',
+    panelId: value.panelId, targetId: value.targetId, url: sanitizeUrl(value.url),
     width: value.width, height: value.height,
+    ...(viewport ? { viewport } : {}),
     createdAt: Number.isFinite(value.createdAt) ? value.createdAt : typeof value.createdAt === 'string' ? value.createdAt : '',
     path: value.path
   }
@@ -559,7 +649,7 @@ export function migratePersistedState(saved, defaults) {
     result: restoredPanel(source.browserPanels?.result, defaults.browserPanels.result, legacyUrl),
     reference: restoredPanel(source.browserPanels?.reference, defaults.browserPanels.reference)
   }
-  const reviewContext = restoredReviewContext(source.reviewContext, browserPanels, source.schemaVersion !== PERSISTED_SCHEMA_VERSION)
+  const reviewContext = restoredReviewContext(source.reviewContext, browserPanels, Number(source.schemaVersion) < 6)
   const restored = {
     ...defaults,
     schemaVersion: PERSISTED_SCHEMA_VERSION,
@@ -575,7 +665,7 @@ export function migratePersistedState(saved, defaults) {
     qcJson: typeof source.qcJson === 'string' ? source.qcJson : '',
     capture: restoredCapture(source.capture)
   }
-  if (!restored.capture && source.schemaVersion !== PERSISTED_SCHEMA_VERSION && isRecord(source.capture)) {
+  if (!restored.capture && Number(source.schemaVersion) < 6 && isRecord(source.capture)) {
     const panel = browserPanels[source.capture.panelId]
     if (panel && source.capture.url === panel.url) {
       restored.capture = restoredCapture({ ...source.capture, targetId: panel.targetId })
@@ -597,7 +687,7 @@ export function migratePersistedState(saved, defaults) {
 
 // Provider descriptor registry. Midjourney is the first adapter: its QC wire
 // format is the frozen schema-v1 document contract (`validateQcDocument`).
-// Descriptor dimensions MUST be drawn from the persisted schema-v6 candidate
+// Descriptor dimensions MUST be drawn from the persisted schema-v7 candidate
 // dimension vocabulary (`QC_DIMENSIONS`) so structured review state stays
 // storable without a persisted-schema bump; `assertProviderRegistry` enforces
 // this at module init.
@@ -660,6 +750,30 @@ export const PROVIDERS = Object.freeze({
     chatImageToolNames: Object.freeze(['higgsfield']),
     qcDocument: null,
     automation: null
+  }),
+  'higgsfield-web': Object.freeze({
+    id: 'higgsfield-web',
+    label: 'Higgsfield Web — Unlimited',
+    profileId: 'higgsfield-image',
+    candidateIds: CANDIDATE_IDS,
+    structuredReview: true,
+    dimensions: Object.freeze(['promptFidelity', 'identityReferenceFidelity', 'anatomyGeometry', 'artifacts', 'colorMaterialFidelity', 'typography', 'composition']),
+    dimensionLabels: Object.freeze({
+      promptFidelity: 'Prompt adherence',
+      identityReferenceFidelity: 'Subject / product identity',
+      anatomyGeometry: 'Anatomy & geometry',
+      artifacts: 'Artifacts & cleanup',
+      colorMaterialFidelity: 'Color grade & critical colors',
+      typography: 'Text, logo & labels',
+      composition: 'Framing & crop'
+    }),
+    chatImageToolNames: Object.freeze([]),
+    qcDocument: null,
+    automation: Object.freeze({
+      target: 'hermes-internal-browser-pane',
+      recipe: 'higgsfield-web-2026-07-20.v1',
+      externalBrowserFallback: 'forbidden'
+    })
   })
 })
 
@@ -703,9 +817,14 @@ export function qcProfileFor(input = {}) {
   if (/\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) || toolName.includes('generate_video')) return 'higgsfield-video'
   return matches.length ? matches[0].profileId : 'design'
 }
-const AGENT_COMMAND_OPS = ['status', 'set-target', 'link', 'capture', 'inspect', 'page-checks', 'set-check', 'score-candidate', 'select-candidate', 'import-qc']
+const AGENT_COMMAND_OPS = ['status', 'set-target', 'link', 'capture', 'inspect', 'page-checks', 'midjourney-probe', 'midjourney-control', 'higgsfield-control', 'set-check', 'score-candidate', 'select-candidate', 'import-qc']
 const AGENT_PANEL_IDS = ['result', 'reference']
 const AGENT_CHECK_STATUSES = ['pass', 'fail', 'na', 'pending']
+const MIDJOURNEY_CONTROL_ACTIONS = ['capabilities', 'state', 'navigate', 'probe', 'results', 'settings', 'draft', 'attach', 'detach', 'validate', 'submit', 'wait', 'link', 'grid', 'action', 'download', 'capture', 'qc']
+export const HIGGSFIELD_MODELS = Object.freeze(['Seedream 5.0 Lite', 'Nano Banana 2', 'Seedream 4.5'])
+export const HIGGSFIELD_ASPECTS = Object.freeze(['1:1', '9:16', '16:9'])
+export const HIGGSFIELD_GENERATION_STATUSES = Object.freeze(['idle', 'queued', 'generating', 'complete', 'failed', 'unknown'])
+export const HIGGSFIELD_CONTROL_ACTIONS = Object.freeze(['capabilities', 'state', 'navigate', 'draft', 'validate', 'generate', 'results', 'observe', 'link', 'repair', 'qc'])
 
 function agentCommandError(message) {
   return { ok: false, error: message }
@@ -718,6 +837,47 @@ function hasOnlyKeys(value, keys) {
 function validAgentString(value, max) {
   return typeof value === 'string' && value.length <= max
 }
+function validateMidjourneyControlPayload(payload) {
+  if (!isRecord(payload) || !MIDJOURNEY_CONTROL_ACTIONS.includes(payload.action)) return false
+  const common = ['action']
+  if (['capabilities', 'state', 'probe', 'results', 'validate', 'grid', 'capture', 'qc'].includes(payload.action)) return hasOnlyKeys(payload, common)
+  if (payload.action === 'settings') {
+    if (hasOnlyKeys(payload, common)) return true
+    if (!hasOnlyKeys(payload, [...common, 'name', 'value']) || !validAgentString(payload.name, 40)) return false
+    const choices = {
+      aspect: ['portrait', 'square', 'landscape'], model: ['standard', 'hd'], raw: ['standard', 'raw'],
+      speed: ['relax', 'fast'], videoResolution: ['sd', 'hd'], personalization: [true, false]
+    }
+    if (Object.hasOwn(choices, payload.name)) return choices[payload.name].includes(payload.value)
+    return false
+  }
+  if (payload.action === 'download') return hasOnlyKeys(payload, [...common, 'jobId', 'filename']) && validAgentString(payload.jobId, 80) && /^[A-Za-z0-9_-]+$/.test(payload.jobId) && validAgentString(payload.filename, 120) && /^[A-Za-z0-9._-]+\.(?:png|jpe?g|webp|gif|avif|bmp)$/i.test(payload.filename)
+  if (payload.action === 'navigate') return hasOnlyKeys(payload, [...common, 'url']) && validAgentString(payload.url, 4096) && /^https:\/\/(?:www\.)?midjourney\.com(?:\/|$)/i.test(payload.url)
+  if (payload.action === 'draft') return hasOnlyKeys(payload, [...common, 'prompt', 'parameters']) && validAgentString(payload.prompt, 6000) && payload.prompt.trim().length > 0 && (!Object.hasOwn(payload, 'parameters') || isRecord(payload.parameters))
+  if (payload.action === 'attach') return hasOnlyKeys(payload, [...common, 'path', 'role']) && validAgentString(payload.path, 4096) && payload.path.length > 0 && ['start-frame', 'image-prompt', 'style-reference', 'omni-reference'].includes(payload.role)
+  if (payload.action === 'detach') return hasOnlyKeys(payload, [...common, 'role']) && ['start-frame', 'image-prompt', 'style-reference', 'omni-reference'].includes(payload.role)
+  if (payload.action === 'submit') return hasOnlyKeys(payload, [...common, 'approved', 'idempotencyKey', 'validateReceipt', 'batchFingerprint']) && payload.approved === true && validAgentString(payload.idempotencyKey, 128) && payload.idempotencyKey.length >= 8 && validAgentString(payload.validateReceipt, 80) && payload.validateReceipt.length > 0 && /^[a-f0-9]{64}$/.test(String(payload.batchFingerprint || ''))
+  if (payload.action === 'wait') return hasOnlyKeys(payload, [...common, 'timeoutMs']) && (!Object.hasOwn(payload, 'timeoutMs') || Number.isInteger(payload.timeoutMs) && payload.timeoutMs >= 1000 && payload.timeoutMs <= 30000)
+  if (payload.action === 'link') return hasOnlyKeys(payload, [...common, 'operationId', 'prompt', 'jobId', 'acknowledged', 'ledgerCreatedAt']) && /^[a-f0-9]{64}$/.test(String(payload.operationId || '')) && validAgentString(payload.prompt, 6000) && payload.prompt.trim().length > 0 && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(payload.jobId || '')) && payload.acknowledged === true && validAgentString(payload.ledgerCreatedAt, 40) && Number.isFinite(Date.parse(payload.ledgerCreatedAt))
+  if (payload.action === 'action') {
+    const validName = ['select', 'upscale', 'vary', 'reroll', 'pan', 'zoom'].includes(payload.name)
+    const validCandidate = !Object.hasOwn(payload, 'candidate') || ['A', 'B', 'C', 'D', '1', '2', '3', '4'].includes(String(payload.candidate))
+    const validJob = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(payload.jobId || ''))
+    if (payload.name === 'select') return hasOnlyKeys(payload, [...common, 'name', 'candidate', 'jobId']) && validName && Object.hasOwn(payload, 'candidate') && validCandidate && validJob
+    return hasOnlyKeys(payload, [...common, 'name', 'candidate', 'jobId', 'approved', 'idempotencyKey']) && validName && validCandidate && validJob && payload.approved === true && validAgentString(payload.idempotencyKey, 128) && payload.idempotencyKey.length >= 8
+  }
+  return false
+}
+export function validateHiggsfieldControlPayload(payload) {
+  if (!isRecord(payload) || !HIGGSFIELD_CONTROL_ACTIONS.includes(payload.action)) return false
+  if (['capabilities', 'state', 'validate', 'results', 'observe', 'qc'].includes(payload.action)) return hasOnlyKeys(payload, ['action'])
+  if (payload.action === 'navigate') return hasOnlyKeys(payload, ['action', 'url']) && validAgentString(payload.url, 4096) && /^https:\/\/(?:www\.)?higgsfield\.ai(?:\/|$)/i.test(payload.url)
+  if (payload.action === 'draft') return hasOnlyKeys(payload, ['action', 'prompt', 'aspect', 'model']) && validAgentString(payload.prompt, 6000) && payload.prompt.trim().length > 0 && HIGGSFIELD_ASPECTS.includes(payload.aspect) && HIGGSFIELD_MODELS.includes(payload.model)
+  if (payload.action === 'generate') return hasOnlyKeys(payload, ['action', 'billableConfirmed', 'idempotencyKey', 'validateReceipt', 'batchFingerprint']) && payload.billableConfirmed === true && validAgentString(payload.idempotencyKey, 128) && payload.idempotencyKey.length >= 8 && validAgentString(payload.validateReceipt, 80) && /^[a-f0-9]{64}$/.test(String(payload.batchFingerprint || ''))
+  if (payload.action === 'link') return hasOnlyKeys(payload, ['action', 'observationReceipt']) && validAgentString(payload.observationReceipt, 80) && payload.observationReceipt.length > 0
+  if (payload.action === 'repair') return hasOnlyKeys(payload, ['action', 'approved']) && payload.approved === true
+  return false
+}
 
 export function validateAgentCommand(value) {
   if (!isRecord(value) || !hasOnlyKeys(value, ['id', 'op', 'panelId', 'payload'])) return agentCommandError('Command must be an object with only id, op, panelId, and payload')
@@ -725,7 +885,7 @@ export function validateAgentCommand(value) {
   if (!AGENT_COMMAND_OPS.includes(value.op)) return agentCommandError('op is unknown')
   if (!isRecord(value.payload)) return agentCommandError('payload must be an object')
 
-  const needsPanel = ['set-target', 'link', 'capture', 'inspect', 'page-checks'].includes(value.op)
+  const needsPanel = ['set-target', 'link', 'capture', 'inspect', 'page-checks', 'midjourney-probe', 'midjourney-control', 'higgsfield-control'].includes(value.op)
   if (needsPanel ? !AGENT_PANEL_IDS.includes(value.panelId) : Object.hasOwn(value, 'panelId')) {
     return agentCommandError(needsPanel ? 'panelId must be result or reference' : 'panelId is not allowed for this op')
   }
@@ -739,7 +899,9 @@ export function validateAgentCommand(value) {
       (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240)) return { ok: true, command: value }
   if (value.op === 'link' && hasOnlyKeys(payload, ['profileId']) &&
       (!Object.hasOwn(payload, 'profileId') || QC_PROFILE_IDS.includes(payload.profileId))) return { ok: true, command: value }
-  if (['capture', 'inspect', 'page-checks'].includes(value.op) && hasOnlyKeys(payload, [])) return { ok: true, command: value }
+  if (['capture', 'inspect', 'page-checks', 'midjourney-probe'].includes(value.op) && hasOnlyKeys(payload, [])) return { ok: true, command: value }
+  if (value.op === 'midjourney-control' && validateMidjourneyControlPayload(payload)) return { ok: true, command: value }
+  if (value.op === 'higgsfield-control' && validateHiggsfieldControlPayload(payload)) return { ok: true, command: value }
   if (value.op === 'set-check' && hasOnlyKeys(payload, ['profileId', 'checkId', 'status', 'note']) &&
       QC_PROFILE_IDS.includes(payload.profileId) && validAgentString(payload.checkId, 64) && payload.checkId &&
       AGENT_CHECK_STATUSES.includes(payload.status) &&
@@ -771,15 +933,17 @@ export function agentStatusSnapshot(state) {
     qcTargetPanelId: state.qcTargetPanelId,
     reviewContext: context ? {
       contextId: context.contextId, panelId: context.panelId, targetId: context.targetId, profileId: context.profileId,
-      url: context.url, mediaKind: context.mediaKind, stale: context.stale, staleReason: context.staleReason,
+      url: sanitizeUrl(context.url), mediaKind: context.mediaKind, stale: context.stale, staleReason: context.staleReason,
       providerJobId: context.providerEvidence?.jobId || ''
     } : null,
     panels: Object.fromEntries(AGENT_PANEL_IDS.map(panelId => {
       const panel = state.browserPanels[panelId] || {}
-      return [panelId, { url: panel.url || '', targetId: panel.targetId || '', mediaKind: mediaKind(panel.url) }]
+      return [panelId, { url: sanitizeUrl(panel.url), targetId: panel.targetId || '', mediaKind: mediaKind(panel.url) }]
     })),
     capture: state.capture ? {
-      panelId: state.capture.panelId, targetId: state.capture.targetId, width: state.capture.width, height: state.capture.height, path: state.capture.path
+      panelId: state.capture.panelId, targetId: state.capture.targetId, url: sanitizeUrl(state.capture.url),
+      ...(state.capture.viewport ? { viewport: state.capture.viewport } : {}),
+      width: state.capture.width, height: state.capture.height, path: state.capture.path
     } : null,
     evaluations: Object.fromEntries(Object.entries(state.evaluations || {}).map(([profileId, checks]) => [
       profileId, Object.fromEntries(Object.entries(checks || {}).map(([checkId, evaluation]) => [checkId, { status: evaluation.status }]))

@@ -26,8 +26,8 @@ router = APIRouter()
 
 _COMMAND_OPS = {
     "status", "set-target", "link", "capture", "inspect", "page-checks",
-    "midjourney-probe", "midjourney-control", "set-check", "score-candidate",
-    "select-candidate", "import-qc",
+    "midjourney-probe", "midjourney-control", "higgsfield-control", "set-check",
+    "score-candidate", "select-candidate", "import-qc",
 }
 _COMMAND_QUEUE: deque[dict[str, Any]] = deque(maxlen=200)
 _RESULTS: dict[str, dict[str, Any]] = {}
@@ -236,7 +236,8 @@ def _sanitize_sensitive_urls(value: Any, depth: int = 0) -> Any:
             return value
         query = [(key, item) for key, item in parse_qsl(parsed.query, keep_blank_values=True)
                  if not any(marker in key.lower() for marker in ("token", "sig", "signature", "expires", "key", "auth"))]
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query, doseq=True), parsed.fragment))
+        hostname = parsed.hostname or ""
+        return urlunsplit((parsed.scheme, hostname, parsed.path, urlencode(query, doseq=True), ""))
     if isinstance(value, dict):
         return {
             _sanitize_sensitive_urls(key, depth + 1) if isinstance(key, str) else key:
@@ -428,12 +429,63 @@ async def _json_body(request: Request) -> dict[str, Any]:
     return body
 
 
+def _valid_higgsfield_command(command: dict[str, Any]) -> bool:
+    payload = command.get("payload")
+    if not isinstance(payload, dict) or command.get("op") != "higgsfield-control":
+        return True
+    action = payload.get("action")
+    if action in {"capabilities", "state", "validate", "results", "observe", "qc"}:
+        return set(payload) == {"action"}
+    if action == "navigate":
+        return set(payload) == {"action", "url"} and isinstance(payload["url"], str) and payload["url"].startswith("https://")
+    if action == "draft":
+        return (
+            set(payload) == {"action", "prompt", "aspect", "model"}
+            and isinstance(payload["prompt"], str) and bool(payload["prompt"].strip())
+            and payload["aspect"] in {"1:1", "16:9", "9:16"}
+            and payload["model"] in {"Seedream 5.0 Lite", "Nano Banana 2", "Seedream 4.5"}
+        )
+    if action == "link":
+        return (
+            set(payload) == {"action", "observationReceipt"}
+            and isinstance(payload["observationReceipt"], str)
+            and bool(payload["observationReceipt"])
+            and len(payload["observationReceipt"]) <= 80
+        )
+    if action == "repair":
+        return set(payload) == {"action", "approved"} and payload["approved"] is True
+    if action == "generate":
+        fingerprint = payload.get("batchFingerprint")
+        return (
+            set(payload) == {"action", "billableConfirmed", "idempotencyKey", "validateReceipt", "batchFingerprint"}
+            and payload["billableConfirmed"] is True
+            and isinstance(payload["idempotencyKey"], str) and 8 <= len(payload["idempotencyKey"]) <= 128
+            and isinstance(payload["validateReceipt"], str) and bool(payload["validateReceipt"])
+            and isinstance(fingerprint, str) and len(fingerprint) == 64
+            and all(char in "0123456789abcdef" for char in fingerprint.lower())
+        )
+    return False
+
+
 def _validate_command(command: dict[str, Any]) -> None:
     command_id = command.get("id")
     if not isinstance(command_id, str) or not command_id or len(command_id) > 64:
         raise HTTPException(status_code=400, detail="Command id must be a non-empty string of at most 64 characters")
     if command.get("op") not in _COMMAND_OPS:
         raise HTTPException(status_code=400, detail="Command op is not supported")
+    if command.get("op") == "set-target":
+        payload = command.get("payload")
+        if not isinstance(payload, dict) or not set(payload).issubset({"url", "preset", "width", "height"}) or "url" not in payload:
+            raise HTTPException(status_code=400, detail="Set-target command must use the typed target contract")
+        if not isinstance(payload["url"], str) or not payload["url"]:
+            raise HTTPException(status_code=400, detail="Set-target URL must be a non-empty string")
+        if "preset" in payload and not isinstance(payload["preset"], str):
+            raise HTTPException(status_code=400, detail="Set-target preset must be a string")
+        for dimension in ("width", "height"):
+            if dimension in payload and (not isinstance(payload[dimension], int) or isinstance(payload[dimension], bool) or payload[dimension] < 240):
+                raise HTTPException(status_code=400, detail=f"Set-target {dimension} must be an integer of at least 240")
+    if not _valid_higgsfield_command(command):
+        raise HTTPException(status_code=400, detail="Higgsfield command must use the typed lifecycle contract")
 
 
 async def _broadcast_command(command: dict[str, Any]) -> int:

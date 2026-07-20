@@ -75,7 +75,7 @@ function isRecord(value) {
 function boundedMetadataString(value, max = 4000) {
   return typeof value === 'string' ? value.slice(0, max) : ''
 }
-const URL_SECRET_PARAM = /(?:^|[_-])(?:token|sig(?:nature)?|expires?|key|auth(?:entication|orization)?|secret|credential|session)(?:$|[_-])/i
+const URL_SECRET_PARAM = /token|sig|signature|expires|apikey|accesskey|keypair|auth|secret|credential|session|cookie|password|(?:^|[^a-z])key(?:$|[^a-z])/i
 
 export function sanitizeUrl(value) {
   const raw = boundedMetadataString(value, 4096)
@@ -83,12 +83,21 @@ export function sanitizeUrl(value) {
   try {
     const url = new URL(raw)
     for (const key of [...url.searchParams.keys()]) {
-      if (URL_SECRET_PARAM.test(key)) url.searchParams.delete(key)
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '')
+      if (URL_SECRET_PARAM.test(normalized)) url.searchParams.delete(key)
     }
-    const base = raw.split(/[?#]/, 1)[0]
-    return url.searchParams.size ? `${base}?${url.searchParams}` : base
+    if (['http:', 'https:'].includes(url.protocol)) {
+      const path = url.pathname === '/' ? '' : url.pathname
+      const base = `${url.protocol}//${url.hostname}${path}`
+      return url.searchParams.size ? `${base}?${url.searchParams}` : base
+    }
+    if (!['file:', 'data:'].includes(url.protocol)) return ''
+    url.username = ''
+    url.password = ''
+    url.hash = ''
+    return url.toString()
   } catch {
-    return raw
+    return ''
   }
 }
 
@@ -213,7 +222,10 @@ export function restoredProviderEvidence(value) {
   }
 }
 export function providerEvidenceIdentity(evidence) {
-  return evidence ? `${evidence.jobId}|${evidence.resultUrl}|${evidence.model}` : ''
+  return evidence ? [
+    evidence.source, evidence.jobId, evidence.resultUrl, evidence.model,
+    evidence.status, evidence.aspectRatio
+  ].join('|') : ''
 }
 export function midjourneyJobLocation(rawUrl) {
   try {
@@ -809,9 +821,10 @@ const AGENT_COMMAND_OPS = ['status', 'set-target', 'link', 'capture', 'inspect',
 const AGENT_PANEL_IDS = ['result', 'reference']
 const AGENT_CHECK_STATUSES = ['pass', 'fail', 'na', 'pending']
 const MIDJOURNEY_CONTROL_ACTIONS = ['capabilities', 'state', 'navigate', 'probe', 'results', 'settings', 'draft', 'attach', 'detach', 'validate', 'submit', 'wait', 'link', 'grid', 'action', 'download', 'capture', 'qc']
-const HIGGSFIELD_MODELS = ['Seedream 5.0 Lite', 'Nano Banana 2', 'Seedream 4.5']
-const HIGGSFIELD_ASPECTS = ['1:1', '16:9', '9:16']
-const HIGGSFIELD_CONTROL_ACTIONS = ['capabilities', 'state', 'navigate', 'draft', 'validate', 'generate', 'results', 'qc']
+export const HIGGSFIELD_MODELS = Object.freeze(['Seedream 5.0 Lite', 'Nano Banana 2', 'Seedream 4.5'])
+export const HIGGSFIELD_ASPECTS = Object.freeze(['1:1', '9:16', '16:9'])
+export const HIGGSFIELD_GENERATION_STATUSES = Object.freeze(['idle', 'queued', 'generating', 'complete', 'failed', 'unknown'])
+export const HIGGSFIELD_CONTROL_ACTIONS = Object.freeze(['capabilities', 'state', 'navigate', 'draft', 'validate', 'generate', 'results', 'observe', 'link', 'repair', 'qc'])
 
 function agentCommandError(message) {
   return { ok: false, error: message }
@@ -857,10 +870,12 @@ function validateMidjourneyControlPayload(payload) {
 }
 export function validateHiggsfieldControlPayload(payload) {
   if (!isRecord(payload) || !HIGGSFIELD_CONTROL_ACTIONS.includes(payload.action)) return false
-  if (['capabilities', 'state', 'validate', 'results', 'qc'].includes(payload.action)) return hasOnlyKeys(payload, ['action'])
+  if (['capabilities', 'state', 'validate', 'results', 'observe', 'qc'].includes(payload.action)) return hasOnlyKeys(payload, ['action'])
   if (payload.action === 'navigate') return hasOnlyKeys(payload, ['action', 'url']) && validAgentString(payload.url, 4096) && /^https:\/\/(?:www\.)?higgsfield\.ai(?:\/|$)/i.test(payload.url)
   if (payload.action === 'draft') return hasOnlyKeys(payload, ['action', 'prompt', 'aspect', 'model']) && validAgentString(payload.prompt, 6000) && payload.prompt.trim().length > 0 && HIGGSFIELD_ASPECTS.includes(payload.aspect) && HIGGSFIELD_MODELS.includes(payload.model)
   if (payload.action === 'generate') return hasOnlyKeys(payload, ['action', 'billableConfirmed', 'idempotencyKey', 'validateReceipt', 'batchFingerprint']) && payload.billableConfirmed === true && validAgentString(payload.idempotencyKey, 128) && payload.idempotencyKey.length >= 8 && validAgentString(payload.validateReceipt, 80) && /^[a-f0-9]{64}$/.test(String(payload.batchFingerprint || ''))
+  if (payload.action === 'link') return hasOnlyKeys(payload, ['action', 'observationReceipt']) && validAgentString(payload.observationReceipt, 80) && payload.observationReceipt.length > 0
+  if (payload.action === 'repair') return hasOnlyKeys(payload, ['action', 'approved']) && payload.approved === true
   return false
 }
 
@@ -877,12 +892,11 @@ export function validateAgentCommand(value) {
 
   const payload = value.payload
   if (value.op === 'status' && hasOnlyKeys(payload, [])) return { ok: true, command: value }
-  if (value.op === 'set-target' && hasOnlyKeys(payload, ['url', 'preset', 'width', 'height', 'providerEvidence']) &&
+  if (value.op === 'set-target' && hasOnlyKeys(payload, ['url', 'preset', 'width', 'height']) &&
       validAgentString(payload.url, 4096) && /^(https?|file|data):/i.test(payload.url) &&
       (!Object.hasOwn(payload, 'preset') || validAgentString(payload.preset, 64)) &&
       (!Object.hasOwn(payload, 'width') || Number.isInteger(payload.width) && payload.width >= 240) &&
-      (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240) &&
-      (!Object.hasOwn(payload, 'providerEvidence') || (restoredProviderEvidence(payload.providerEvidence) !== null && comparableUrl(restoredProviderEvidence(payload.providerEvidence).resultUrl) === comparableUrl(payload.url)))) return { ok: true, command: value }
+      (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240)) return { ok: true, command: value }
   if (value.op === 'link' && hasOnlyKeys(payload, ['profileId']) &&
       (!Object.hasOwn(payload, 'profileId') || QC_PROFILE_IDS.includes(payload.profileId))) return { ok: true, command: value }
   if (['capture', 'inspect', 'page-checks', 'midjourney-probe'].includes(value.op) && hasOnlyKeys(payload, [])) return { ok: true, command: value }
@@ -948,7 +962,7 @@ export function applyAgentCommand(state, command, makeId = createId) {
   const { op, payload } = command
   if (op === 'status') return { state, summary: 'Status snapshot' }
   if (op === 'set-target') {
-    const patch = Object.fromEntries(Object.entries(payload).filter(([key]) => ['url', 'preset', 'width', 'height', 'providerEvidence'].includes(key)))
+    const patch = Object.fromEntries(Object.entries(payload).filter(([key]) => ['url', 'preset', 'width', 'height'].includes(key)))
     return { state: updatePanelState(state, command.panelId, patch, {}, makeId), summary: `Set ${command.panelId} target` }
   }
   if (op === 'link') {

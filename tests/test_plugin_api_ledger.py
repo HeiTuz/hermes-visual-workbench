@@ -80,6 +80,60 @@ class BillableLedgerTests(unittest.TestCase):
         second, existing = plugin_api._reserve_billable_command(replay, "higgsfield-generate", "hf-fixture-key-1234")
         self.assertTrue(existing)
         self.assertEqual(second, first)
+    def test_higgsfield_typed_command_rejects_caller_asserted_result_link(self) -> None:
+        command = {
+            "id": "hf-caller-link",
+            "op": "higgsfield-control",
+            "panelId": "result",
+            "payload": {
+                "action": "results",
+                "providerJobId": "caller-job",
+                "resultUrl": "https://cdn.higgsfield.ai/result.png?token=secret",
+            },
+        }
+        self.assertFalse(plugin_api._valid_higgsfield_command(command))
+    def test_higgsfield_observation_link_and_repair_use_typed_payloads(self) -> None:
+        base = {"id": "hf-lifecycle", "op": "higgsfield-control", "panelId": "result"}
+        self.assertTrue(plugin_api._valid_higgsfield_command({**base, "payload": {"action": "observe"}}))
+        self.assertTrue(plugin_api._valid_higgsfield_command({
+            **base, "payload": {"action": "link", "observationReceipt": "hfo-fixture"}
+        }))
+        self.assertTrue(plugin_api._valid_higgsfield_command({
+            **base, "payload": {"action": "repair", "approved": True}
+        }))
+        self.assertFalse(plugin_api._valid_higgsfield_command({
+            **base, "payload": {"action": "link", "observationReceipt": "hfo-fixture", "resultUrl": "https://evil.example/result"}
+        }))
+        self.assertFalse(plugin_api._valid_higgsfield_command({
+            **base, "payload": {"action": "repair", "approved": False}
+        }))
+    def test_set_target_rejects_caller_provenance_at_backend_boundary(self) -> None:
+        with self.assertRaises(HTTPException):
+            plugin_api._validate_command({
+                "id": "hf-set-target",
+                "op": "set-target",
+                "panelId": "result",
+                "payload": {
+                    "url": "https://example.com/result.png",
+                    "providerEvidence": {"source": "higgsfield-web", "jobId": "caller"},
+                },
+            })
+        plugin_api._validate_command({
+            "id": "plain-set-target",
+            "op": "set-target",
+            "panelId": "result",
+            "payload": {"url": "https://example.com/result.png", "width": 1024, "height": 1024},
+        })
+
+    def test_higgsfield_result_urls_are_redacted_before_storage(self) -> None:
+        result = plugin_api._sanitize_sensitive_urls({
+            "provenance": {"resultUrl": "https://cdn.higgsfield.ai/result.png?token=secret&width=1024"},
+        })
+        self.assertEqual(result["provenance"]["resultUrl"], "https://cdn.higgsfield.ai/result.png?width=1024")
+        redacted = plugin_api._sanitize_sensitive_urls(
+            "https://user:password@example.com/result.png?token=secret&width=1024#fragment-secret"
+        )
+        self.assertEqual(redacted, "https://example.com/result.png?width=1024")
 
     def test_reservation_survives_reload_and_never_rebroadcasts(self) -> None:
         first, existing = plugin_api._reserve_billable_command(self.command("submit-1"), "submit", "fixture-key-1234")

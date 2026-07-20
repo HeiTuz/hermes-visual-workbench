@@ -123,19 +123,18 @@ Midjourney automation is pinned to the Browser pane inside the Hermes Desktop wi
 
 The Browser pane displays a visible **Automation target** affordance. With the privileged guest active it reads `Automation target · Hermes internal Browser pane · persist:hermes-browser`; in iframe fallback it reads `Automation target unavailable`, and the packaged workflow hard-stops as `internal_pane_unavailable` instead of retargeting any external browser or isolated `browser_*` session. Agents must re-verify this affordance from a fresh `app="Hermes"` capture immediately before every pointer, focus, or type action.
 
-## Higgsfield CLI provenance bridge
+## Higgsfield read-only CLI inspection
 
-Higgsfield results can be brought into QC from the authenticated `higgsfield` CLI instead of an MCP tool card. `scripts/higgsfield-control.mjs` is a strictly read-only bridge: it maps only observation subcommands (`account status`, `generate list`, `soul-id list`, `model list`, `generate get`) and has no argv passthrough, so paid or mutating subcommands (`generate create`, `soul-id train`, `upload`, `publish`, `auth token`, ...) are unreachable by construction.
+Existing Higgsfield jobs can still be inspected through the authenticated `higgsfield` CLI without an MCP tool card. `scripts/higgsfield-control.mjs` maps only observation subcommands (`account status`, `generate list`, `soul-id list`, `model list`, `generate get`) and has no argv passthrough, so paid or mutating subcommands are unreachable by construction.
 
 ```bash
-# Normalize one existing job into Visual Workbench provider evidence (signed query stripped)
 node scripts/higgsfield-control.mjs evidence --url "<result_url>"
 node scripts/higgsfield-control.mjs evidence --job-id "<job-id>"
 ```
 
-The agent binds that provenance into QC over the command socket with `set-target { url, providerEvidence }` followed by `link { profileId: "higgsfield-image" }`. `set-target` accepts `providerEvidence` only when it normalizes to a recognized provider and its result URL path matches the target URL; the URL is sanitized before storage, so no signed query survives.
+CLI evidence is diagnostic only and cannot be attached to QC through `set-target`. Trusted Web provenance is created inside Hermes: run the typed Higgsfield `observe` action on a completed result, then consume its short-lived one-shot `observationReceipt` with the typed `link` action. The Electron observer verifies the Unlimited UI state and exact result provenance; the plugin strips signed URL data before durable storage.
 
-The bridge never uses the `hf` alias, which on many hosts resolves to the HuggingFace CLI; it always invokes `higgsfield` (override with `HIGGSFIELD_BIN`). No generation is ever triggered from this bridge.
+The bridge never uses the `hf` alias, which commonly resolves to the HuggingFace CLI; it always invokes `higgsfield` (override with `HIGGSFIELD_BIN`). This read-only bridge never triggers generation.
 
 ## Non-billable fixture E2E
 

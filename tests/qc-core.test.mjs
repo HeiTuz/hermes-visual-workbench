@@ -304,6 +304,13 @@ test('binds Higgsfield metadata only to one exact raw receipt and redacts URL se
   collision.toolResult.structuredContent.items.push({ id: 'duplicate', results: { rawUrl: src } })
   assert.equal(providerEvidenceFor(collision), null)
   assert.equal(sanitizeUrl('https://cdn.example.test/a?token=x&sig=y&signature=z&expires=1&key=k&auth=a&keep=yes#secret'), 'https://cdn.example.test/a?keep=yes')
+  assert.equal(
+    sanitizeUrl('https://user:password@cdn.example.test/a?apiKey=x&accessToken=y&keep=yes#fragment'),
+    'https://cdn.example.test/a?keep=yes'
+  )
+  assert.equal(sanitizeUrl('https://[malformed'), '')
+  assert.equal(sanitizeUrl('not a URL'), '')
+  assert.equal(sanitizeUrl('javascript:alert(1)'), '')
 })
 
 test('Higgsfield invocation firewall allows inspections only and blocks mutations before invocation', async () => {
@@ -744,6 +751,15 @@ test('restore rejects live contexts whose provenance identity differs from the p
   const dropped = migratePersistedState(substituted, defaults)
   assert.equal(dropped.reviewContext, null, 'live context provenance must match panel provenance')
   assert.deepEqual(dropped.evaluations, {})
+  for (const [field, value] of [['source', 'higgsfield-web'], ['status', 'failed'], ['aspectRatio', '9:16']]) {
+    const changed = structuredClone(linked)
+    changed.browserPanels.reference.providerEvidence[field] = value
+    assert.equal(
+      migratePersistedState(changed, defaults).reviewContext,
+      null,
+      `${field} substitution must stale restored provenance`
+    )
+  }
 
   const staleHistorical = structuredClone(substituted)
   staleHistorical.reviewContext.stale = true
@@ -847,44 +863,19 @@ test('applies linked agent QC commands and emits the complete status snapshot co
   assert.deepEqual(Object.keys(agentStatusSnapshot(scored.state).panels).sort(), ['reference', 'result'])
 })
 
-test('set-target binds sanitized Higgsfield CLI provenance and links it into QC', () => {
+test('set-target rejects caller-asserted Higgsfield provenance', () => {
   const url = 'https://cdn.higgsfield.test/generations/job.png'
-  const signed = `${url}?token=secret-token&sig=secret-sig`
   const providerEvidence = {
     source: 'higgsfield-mcp', jobId: 'cli-job-1', status: 'completed', model: 'text2image_soul_v2',
     soulId: 'soul-9', mediaType: 'image', prompt: 'a portrait', width: 1152, height: 2048,
-    resultUrl: signed, createdAt: 1784570752
+    resultUrl: `${url}?token=secret-token&sig=secret-sig`, createdAt: 1784570752
   }
-  const makeId = prefix => `${prefix}cli-0000`
-  let state = migratePersistedState({}, v5Defaults())
-
-  // Provenance whose result URL path does not match the target URL is rejected.
   assert.equal(
-    validateAgentCommand({ id: 'mismatch', op: 'set-target', panelId: 'result', payload: { url, providerEvidence: { ...providerEvidence, resultUrl: 'https://cdn.higgsfield.test/other.png' } } }).ok,
+    validateAgentCommand({ id: 'caller-provenance', op: 'set-target', panelId: 'result', payload: { url, providerEvidence } }).ok,
     false
   )
-  // Unrecognized provenance source is rejected.
   assert.equal(
-    validateAgentCommand({ id: 'bad-source', op: 'set-target', panelId: 'result', payload: { url, providerEvidence: { source: 'unknown', jobId: 'x', resultUrl: url } } }).ok,
-    false
-  )
-  // Matching provenance is accepted.
-  assert.equal(
-    validateAgentCommand({ id: 'ok', op: 'set-target', panelId: 'result', payload: { url, providerEvidence } }).ok,
+    validateAgentCommand({ id: 'plain-target', op: 'set-target', panelId: 'result', payload: { url } }).ok,
     true
   )
-
-  state = applyAgentCommand(state, { op: 'set-target', panelId: 'result', payload: { url, providerEvidence } }, makeId).state
-  const panel = state.browserPanels.result
-  assert.equal(panel.url, url)
-  assert.equal(panel.providerEvidence.jobId, 'cli-job-1')
-  assert.equal(panel.providerEvidence.model, 'text2image_soul_v2')
-  // Signed query is stripped from the bound provenance.
-  assert.ok(!JSON.stringify(panel.providerEvidence).includes('secret-token'))
-  assert.ok(!JSON.stringify(panel.providerEvidence).includes('secret-sig'))
-
-  state = applyAgentCommand(state, { op: 'link', panelId: 'result', payload: { profileId: 'higgsfield-image' } }, makeId).state
-  assert.equal(state.reviewContext.profileId, 'higgsfield-image')
-  assert.equal(state.reviewContext.providerEvidence.jobId, 'cli-job-1')
-  assert.equal(agentStatusSnapshot(state).reviewContext.providerJobId, 'cli-job-1')
 })

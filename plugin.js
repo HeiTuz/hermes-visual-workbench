@@ -250,7 +250,7 @@ function isRecord(value) {
 function boundedMetadataString(value, max = 4000) {
   return typeof value === 'string' ? value.slice(0, max) : ''
 }
-const URL_SECRET_PARAM = /(?:^|[_-])(?:token|sig(?:nature)?|expires?|key|auth(?:entication|orization)?|secret|credential|session)(?:$|[_-])/i
+const URL_SECRET_PARAM = /token|sig|signature|expires|apikey|accesskey|keypair|auth|secret|credential|session|cookie|password|(?:^|[^a-z])key(?:$|[^a-z])/i
 
 function sanitizeUrl(value) {
   const raw = boundedMetadataString(value, 4096)
@@ -258,12 +258,21 @@ function sanitizeUrl(value) {
   try {
     const url = new URL(raw)
     for (const key of [...url.searchParams.keys()]) {
-      if (URL_SECRET_PARAM.test(key)) url.searchParams.delete(key)
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '')
+      if (URL_SECRET_PARAM.test(normalized)) url.searchParams.delete(key)
     }
-    const base = raw.split(/[?#]/, 1)[0]
-    return url.searchParams.size ? `${base}?${url.searchParams}` : base
+    if (['http:', 'https:'].includes(url.protocol)) {
+      const path = url.pathname === '/' ? '' : url.pathname
+      const base = `${url.protocol}//${url.hostname}${path}`
+      return url.searchParams.size ? `${base}?${url.searchParams}` : base
+    }
+    if (!['file:', 'data:'].includes(url.protocol)) return ''
+    url.username = ''
+    url.password = ''
+    url.hash = ''
+    return url.toString()
   } catch {
-    return raw
+    return ''
   }
 }
 
@@ -362,7 +371,10 @@ function restoredProviderEvidence(value) {
   }
 }
 function providerEvidenceIdentity(evidence) {
-  return evidence ? `${evidence.jobId}|${evidence.resultUrl}|${evidence.model}` : ''
+  return evidence ? [
+    evidence.source, evidence.jobId, evidence.resultUrl, evidence.model,
+    evidence.status, evidence.aspectRatio
+  ].join('|') : ''
 }
 function midjourneyJobLocation(rawUrl) {
   try {
@@ -889,8 +901,9 @@ const AGENT_PANEL_IDS = ['result', 'reference']
 const AGENT_CHECK_STATUSES = ['pass', 'fail', 'na', 'pending']
 const MIDJOURNEY_CONTROL_ACTIONS = ['capabilities', 'state', 'navigate', 'probe', 'results', 'settings', 'draft', 'attach', 'detach', 'validate', 'submit', 'wait', 'link', 'grid', 'action', 'download', 'capture', 'qc']
 const HIGGSFIELD_MODELS = ['Seedream 5.0 Lite', 'Nano Banana 2', 'Seedream 4.5']
-const HIGGSFIELD_ASPECTS = ['1:1', '16:9', '9:16']
-const HIGGSFIELD_CONTROL_ACTIONS = ['capabilities', 'state', 'navigate', 'draft', 'validate', 'generate', 'results', 'qc']
+const HIGGSFIELD_ASPECTS = ['1:1', '9:16', '16:9']
+const HIGGSFIELD_GENERATION_STATUSES = ['idle', 'queued', 'generating', 'complete', 'failed', 'unknown']
+const HIGGSFIELD_CONTROL_ACTIONS = ['capabilities', 'state', 'navigate', 'draft', 'validate', 'generate', 'results', 'observe', 'link', 'repair', 'qc']
 
 function agentCommandError(message) { return { ok: false, error: message } }
 function hasOnlyKeys(value, keys) { return Object.keys(value).every(key => keys.includes(key)) }
@@ -928,10 +941,12 @@ function validateMidjourneyControlPayload(payload) {
 }
 function validateHiggsfieldControlPayload(payload) {
   if (!isRecord(payload) || !HIGGSFIELD_CONTROL_ACTIONS.includes(payload.action)) return false
-  if (['capabilities', 'state', 'validate', 'results', 'qc'].includes(payload.action)) return hasOnlyKeys(payload, ['action'])
+  if (['capabilities', 'state', 'validate', 'results', 'observe', 'qc'].includes(payload.action)) return hasOnlyKeys(payload, ['action'])
   if (payload.action === 'navigate') return hasOnlyKeys(payload, ['action', 'url']) && validAgentString(payload.url, 4096) && /^https:\/\/(?:www\.)?higgsfield\.ai(?:\/|$)/i.test(payload.url)
   if (payload.action === 'draft') return hasOnlyKeys(payload, ['action', 'prompt', 'aspect', 'model']) && validAgentString(payload.prompt, 6000) && payload.prompt.trim().length > 0 && HIGGSFIELD_ASPECTS.includes(payload.aspect) && HIGGSFIELD_MODELS.includes(payload.model)
   if (payload.action === 'generate') return hasOnlyKeys(payload, ['action', 'billableConfirmed', 'idempotencyKey', 'validateReceipt', 'batchFingerprint']) && payload.billableConfirmed === true && validAgentString(payload.idempotencyKey, 128) && payload.idempotencyKey.length >= 8 && validAgentString(payload.validateReceipt, 80) && /^[a-f0-9]{64}$/.test(String(payload.batchFingerprint || ''))
+  if (payload.action === 'link') return hasOnlyKeys(payload, ['action', 'observationReceipt']) && validAgentString(payload.observationReceipt, 80) && payload.observationReceipt.length > 0
+  if (payload.action === 'repair') return hasOnlyKeys(payload, ['action', 'approved']) && payload.approved === true
   return false
 }
 
@@ -944,7 +959,7 @@ function validateAgentCommand(value) {
   if (needsPanel ? !AGENT_PANEL_IDS.includes(value.panelId) : Object.hasOwn(value, 'panelId')) return agentCommandError(needsPanel ? 'panelId must be result or reference' : 'panelId is not allowed for this op')
   const payload = value.payload
   if (value.op === 'status' && hasOnlyKeys(payload, [])) return { ok: true, command: value }
-  if (value.op === 'set-target' && hasOnlyKeys(payload, ['url', 'preset', 'width', 'height', 'providerEvidence']) && validAgentString(payload.url, 4096) && /^(https?|file|data):/i.test(payload.url) && (!Object.hasOwn(payload, 'preset') || validAgentString(payload.preset, 64)) && (!Object.hasOwn(payload, 'width') || Number.isInteger(payload.width) && payload.width >= 240) && (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240) && (!Object.hasOwn(payload, 'providerEvidence') || (restoredProviderEvidence(payload.providerEvidence) !== null && comparableUrl(restoredProviderEvidence(payload.providerEvidence).resultUrl) === comparableUrl(payload.url)))) return { ok: true, command: value }
+  if (value.op === 'set-target' && hasOnlyKeys(payload, ['url', 'preset', 'width', 'height']) && validAgentString(payload.url, 4096) && /^(https?|file|data):/i.test(payload.url) && (!Object.hasOwn(payload, 'preset') || validAgentString(payload.preset, 64)) && (!Object.hasOwn(payload, 'width') || Number.isInteger(payload.width) && payload.width >= 240) && (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240)) return { ok: true, command: value }
   if (value.op === 'link' && hasOnlyKeys(payload, ['profileId']) && (!Object.hasOwn(payload, 'profileId') || QC_PROFILE_IDS.includes(payload.profileId))) return { ok: true, command: value }
   if (['capture', 'inspect', 'page-checks', 'midjourney-probe'].includes(value.op) && hasOnlyKeys(payload, [])) return { ok: true, command: value }
   if (value.op === 'midjourney-control' && validateMidjourneyControlPayload(payload)) return { ok: true, command: value }
@@ -1213,6 +1228,7 @@ const HIGGSFIELD_SELECTOR_REGISTRY = Object.freeze({
   targets: Object.freeze(['higgsfield-composer', 'higgsfield-aspect-square', 'higgsfield-aspect-portrait', 'higgsfield-aspect-landscape', 'higgsfield-model-seedream-5-lite', 'higgsfield-model-nano-banana-2', 'higgsfield-model-seedream-4-5', 'higgsfield-generate'])
 })
 const higgsfieldValidations = new Map()
+const higgsfieldObservationReceipts = new Map()
 const higgsfieldDrafts = new Map()
 const HIGGSFIELD_MODEL_TARGETS = Object.freeze({
   'Seedream 5.0 Lite': 'higgsfield-model-seedream-5-lite',
@@ -1222,6 +1238,48 @@ const HIGGSFIELD_MODEL_TARGETS = Object.freeze({
 const HIGGSFIELD_ASPECT_TARGETS = Object.freeze({
   '1:1': 'higgsfield-aspect-square', '16:9': 'higgsfield-aspect-landscape', '9:16': 'higgsfield-aspect-portrait'
 })
+const HIGGSFIELD_OBSERVATION_TTL_MS = 60_000
+function redactedHiggsfieldResultUrl(value) {
+  try {
+    const url = new URL(String(value || ''))
+    url.search = ''
+    url.hash = ''
+    return url.toString()
+  } catch { return '' }
+}
+function observedHiggsfieldState(value, context) {
+  if (!isRecord(value) || value.guestWebContentsId !== context.guestId || value.url !== context.url ||
+    !HIGGSFIELD_MODELS.includes(value.selectedModel) || !HIGGSFIELD_ASPECTS.includes(value.selectedAspect) ||
+    value.unlimited !== true || !HIGGSFIELD_GENERATION_STATUSES.includes(value.generationStatus) || !Array.isArray(value.results)) {
+    throw new Error('Higgsfield observation did not satisfy the browser-control contract')
+  }
+  const results = value.results.map(result => isRecord(result) && typeof result.url === 'string' &&
+    typeof result.providerJobId === 'string' && result.url ? { url: result.url, providerJobId: result.providerJobId } : null)
+  if (results.some(result => !result) || results.length > 1) throw new Error('Higgsfield observation contains an invalid or ambiguous result')
+  return { ...value, results }
+}
+async function observeHiggsfield(panelId, context, requireLinkableResult = true) {
+  const observed = observedHiggsfieldState(await higgsfieldControl(panelId, { op: 'observeHiggsfield' }, context), context)
+  if (!requireLinkableResult) return { observed, receipt: '' }
+  if (observed.generationStatus !== 'complete' || observed.results.length !== 1) {
+    throw new Error('A completed unambiguous Higgsfield result is required before linking')
+  }
+  const receipt = createId('hfo-')
+  higgsfieldObservationReceipts.set(receipt, {
+    panelId, targetId: context.targetId, guestId: context.guestId, sourceUrl: context.url,
+    result: observed.results[0], selectedModel: observed.selectedModel, selectedAspect: observed.selectedAspect,
+    generationStatus: observed.generationStatus, expiresAt: Date.now() + HIGGSFIELD_OBSERVATION_TTL_MS
+  })
+  return { observed, receipt }
+}
+function consumeHiggsfieldObservation(panelId, context, receipt) {
+  const observation = higgsfieldObservationReceipts.get(receipt)
+  higgsfieldObservationReceipts.delete(receipt)
+  if (!observation || observation.expiresAt < Date.now() || observation.panelId !== panelId ||
+    observation.targetId !== context.targetId || observation.guestId !== context.guestId ||
+    observation.sourceUrl !== context.url) throw new Error('A fresh matching Higgsfield observation receipt is required')
+  return observation
+}
 function isHiggsfieldPage(rawUrl) {
   try {
     const hostname = new URL(rawUrl).hostname.toLowerCase()
@@ -1267,10 +1325,41 @@ async function runHiggsfieldControl(panelId, payload) {
     host.panes?.setOpen?.(BROWSER_PANE_ID, true)
     return { summary: `Navigated ${panelId} to Higgsfield`, detail: { state: 'NAVIGATING', evidence: { panelId, requestedUrl: payload.url } } }
   }
+  if (payload.action === 'repair') {
+    const context = state.reviewContext
+    const providerEvidence = context?.providerEvidence
+    if (!reviewContextMatches(state, 'higgsfield-image') || context?.panelId !== panelId ||
+      providerEvidence?.source !== 'higgsfield-web' || !providerEvidence.jobId || providerEvidence.status !== 'complete') {
+      throw new Error('Link a fresh completed Higgsfield Web result in this panel before approving repair')
+    }
+    const candidateId = state.selectedCandidate
+    const candidate = state.candidates[candidateId]
+    if (candidate?.disposition !== 'REPAIR' || !candidate.repairPrompt?.trim()) {
+      throw new Error('The selected QC candidate must have a reviewed REPAIR disposition and stored repair prompt')
+    }
+    return { summary: 'Higgsfield repair draft handoff approved', detail: { state: 'DRAFT_HANDOFF', evidence: { provider: 'higgsfield-web', candidateId, prompt: candidate.repairPrompt.trim(), generation: 'not-invoked' } } }
+  }
   const context = currentHiggsfieldContext(panelId)
-  if (payload.action === 'state' || payload.action === 'results') {
-    const result = await higgsfieldControl(panelId, { op: payload.action === 'results' ? 'results' : 'snapshot' }, context)
-    return { summary: 'Higgsfield typed browser state', detail: { state: 'OBSERVED', evidence: result } }
+  if (payload.action === 'state') {
+    const { observed } = await observeHiggsfield(panelId, context, false)
+    return { summary: 'Higgsfield typed browser state', detail: { state: 'OBSERVED', evidence: observed } }
+  }
+  if (payload.action === 'results' || payload.action === 'observe') {
+    const { observed, receipt } = await observeHiggsfield(panelId, context)
+    return { summary: 'Higgsfield typed browser observation', detail: { state: 'OBSERVED', evidence: observed, observationReceipt: receipt } }
+  }
+  if (payload.action === 'link') {
+    const observation = consumeHiggsfieldObservation(panelId, context, payload.observationReceipt)
+    const resultUrl = redactedHiggsfieldResultUrl(observation.result.url)
+    if (!resultUrl) throw new Error('Observed Higgsfield result URL is invalid')
+    const providerEvidence = restoredProviderEvidence({
+      source: 'higgsfield-web', jobId: observation.result.providerJobId, status: observation.generationStatus,
+      model: observation.selectedModel, aspectRatio: observation.selectedAspect, resultUrl
+    })
+    setState(linkPanelState(updatePanelState(state, panelId, {
+      url: resultUrl, providerEvidence, qcProfileHint: 'higgsfield-image'
+    }), panelId, { profileId: 'higgsfield-image' }, createId))
+    return { summary: 'Observed Higgsfield result linked to Quality Control', detail: { state: 'LINKED', evidence: { providerEvidence } } }
   }
   if (payload.action === 'draft') {
     await higgsfieldControl(panelId, { op: 'focusText', targetId: 'higgsfield-composer', text: payload.prompt.trim(), replace: true }, context)
@@ -1292,8 +1381,10 @@ async function runHiggsfieldControl(panelId, payload) {
     }
     const receipt = createId('hfv-')
     const batchFingerprint = await midjourneyPromptHash(`${prompt}\n${draft.aspect}\n${draft.model}`)
-    higgsfieldValidations.set(receipt, { panelId, targetId: context.targetId, url: context.url, prompt, aspect: draft.aspect, model: draft.model, batchFingerprint, expiresAt: Date.now() + 60_000 })
-    return { summary: 'Higgsfield draft is generate-ready', receiptContext: { receiptHash: await midjourneyPromptHash(receipt), batchFingerprint }, detail: { state: 'READY', evidence: { prompt, aspect: draft.aspect, model: draft.model, receipt } } }
+    const expiresAtMs = Date.now() + 60_000
+    const expiresAt = new Date(expiresAtMs).toISOString()
+    higgsfieldValidations.set(receipt, { panelId, targetId: context.targetId, url: context.url, prompt, aspect: draft.aspect, model: draft.model, batchFingerprint, expiresAt: expiresAtMs })
+    return { summary: 'Higgsfield draft is generate-ready', receiptContext: { receiptHash: await midjourneyPromptHash(receipt), batchContextId: batchFingerprint, expiresAt, batchFingerprint }, detail: { state: 'READY', evidence: { prompt, aspect: draft.aspect, model: draft.model, receipt, expiresAt } } }
   }
   if (payload.action === 'generate') {
     const validation = higgsfieldValidations.get(payload.validateReceipt)

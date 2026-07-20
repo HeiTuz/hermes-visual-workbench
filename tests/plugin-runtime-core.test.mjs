@@ -21,6 +21,8 @@ import {
   QC_PROFILE_IDS,
   qcProfileFor,
   validateAgentCommand,
+  validateHiggsfieldControlPayload,
+  HIGGSFIELD_GENERATION_STATUSES,
   applyAgentCommand,
   agentStatusSnapshot,
   validateQcDocument
@@ -60,7 +62,7 @@ function loadRuntimeCore() {
   assert.notEqual(finish, -1, 'plugin core end marker is missing')
   assert.ok(finish > start, 'plugin core markers are out of order')
   const source = pluginSource.slice(start + begin.length, finish)
-  return Function(`${source}\nreturn { DEFAULT_STATE, persistedState, restoredState, restoredProviderEvidence, validateQcDocument, validateAgentCommand, validateHiggsfieldControlPayload, HIGGSFIELD_MODELS, HIGGSFIELD_ASPECTS, applyAgentCommand, agentStatusSnapshot, PROVIDERS, PROVIDER_IDS, providerEvidenceFor, providerForProfile, qcProfileFor, reviewContextMatches, panelLinkedToQc, updatePanelState, linkPanelState, swapPanelsState, markPanelLoadFailedState, providerEvidenceIdentity, midjourneyJobLocation, midjourneyProviderEvidenceForUrl, sameMidjourneyCandidateSwitch, setRuntimeState(value) { state = { ...DEFAULT_STATE, ...value } } }`)()
+  return Function(`${source}\nreturn { DEFAULT_STATE, persistedState, restoredState, restoredProviderEvidence, validateQcDocument, validateAgentCommand, validateHiggsfieldControlPayload, HIGGSFIELD_MODELS, HIGGSFIELD_ASPECTS, HIGGSFIELD_GENERATION_STATUSES, applyAgentCommand, agentStatusSnapshot, PROVIDERS, PROVIDER_IDS, providerEvidenceFor, providerForProfile, qcProfileFor, reviewContextMatches, panelLinkedToQc, updatePanelState, linkPanelState, swapPanelsState, markPanelLoadFailedState, providerEvidenceIdentity, midjourneyJobLocation, midjourneyProviderEvidenceForUrl, sameMidjourneyCandidateSwitch, setRuntimeState(value) { state = { ...DEFAULT_STATE, ...value } } }`)()
 }
 
 function serializableProvider(provider) {
@@ -136,6 +138,50 @@ test('Higgsfield Web rejects caller-asserted QC provenance', () => {
   }
   assert.equal(runtime.validateAgentCommand(command).ok, false)
   assert.equal(validateAgentCommand(command).ok, false)
+})
+test('runtime rejects caller-asserted Higgsfield provider evidence', () => {
+  const runtime = loadRuntimeCore()
+  const command = {
+    id: 'hf-set-target',
+    op: 'set-target',
+    panelId: 'result',
+    payload: {
+      url: 'https://cdn.higgsfield.ai/generations/result.png',
+      providerEvidence: { source: 'higgsfield-web', jobId: 'caller-job', resultUrl: 'https://cdn.higgsfield.ai/generations/result.png' }
+    }
+  }
+  assert.equal(runtime.validateAgentCommand(command).ok, false)
+})
+test('Higgsfield observation receipt implementation is exact, one-shot, and redacts result URLs', () => {
+  assert.match(pluginSource, /op: 'observeHiggsfield'/)
+  assert.match(pluginSource, /guestWebContentsId !== context\.guestId/)
+  assert.match(pluginSource, /value\.unlimited !== true/)
+  assert.match(pluginSource, /results\.length > 1/)
+  assert.match(pluginSource, /higgsfieldObservationReceipts\.delete\(receipt\)/)
+  assert.match(pluginSource, /observation\.expiresAt < Date\.now\(\)/)
+  assert.match(pluginSource, /observation\.targetId !== context\.targetId/)
+  assert.match(pluginSource, /observation\.guestId !== context\.guestId/)
+  assert.match(pluginSource, /observation\.sourceUrl !== context\.url/)
+  assert.match(pluginSource, /url\.search = ''/)
+  assert.match(pluginSource, /url\.hash = ''/)
+  assert.match(pluginSource, /observed\.generationStatus !== 'complete'/)
+})
+test('Higgsfield link provenance and repair handoff reject caller evidence and never generate', () => {
+  const runtime = loadRuntimeCore()
+  assert.equal(runtime.validateHiggsfieldControlPayload({ action: 'link', observationReceipt: 'hfo-receipt' }), true)
+  assert.equal(runtime.validateHiggsfieldControlPayload({ action: 'link', observationReceipt: 'hfo-receipt', providerJobId: 'caller' }), false)
+  assert.equal(runtime.validateHiggsfieldControlPayload({ action: 'repair', approved: true }), true)
+  assert.equal(runtime.validateHiggsfieldControlPayload({ action: 'repair', approved: false }), false)
+  assert.deepEqual(runtime.HIGGSFIELD_GENERATION_STATUSES, HIGGSFIELD_GENERATION_STATUSES)
+  assert.deepEqual(runtime.HIGGSFIELD_ASPECTS, ['1:1', '9:16', '16:9'])
+  const observationAndLink = pluginSource.slice(pluginSource.indexOf('async function observeHiggsfield'), pluginSource.indexOf("if (payload.action === 'draft')"))
+  assert.doesNotMatch(observationAndLink, /op: 'generate'/)
+  const repairStart = pluginSource.indexOf("if (payload.action === 'repair')", pluginSource.indexOf('async function runHiggsfieldControl'))
+  const repair = pluginSource.slice(repairStart, pluginSource.indexOf('const context = currentHiggsfieldContext(panelId)', repairStart))
+  assert.match(repair, /reviewContextMatches\(state, 'higgsfield-image'\)/)
+  assert.match(repair, /candidate\?\.disposition !== 'REPAIR'/)
+  assert.doesNotMatch(repair, /higgsfieldControl|op: 'generate'/)
+  assert.match(pluginSource, /receiptContext: \{ receiptHash: await midjourneyPromptHash\(receipt\), batchContextId: batchFingerprint, expiresAt, batchFingerprint \}/)
 })
 
 test('runtime persisted-state restore repairs malformed and partial candidate data', () => {

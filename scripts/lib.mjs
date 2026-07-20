@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -12,11 +12,16 @@ export function parseArgs(argv) {
   const args = [...argv]
   while (args[0] === '--') args.shift()
 
-  const options = { force: false, help: false, hermesHome: '', skillTarget: '', target: '', uninstall: false }
+  const options = { dryRun: false, force: false, help: false, hermesHome: '', rollback: false, skillTarget: '', target: '', uninstall: false, update: false, verify: false }
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
     if (arg === '--force') options.force = true
+    else if (arg === '--dry-run') options.dryRun = true
+    else if (arg === '--install') {}
+    else if (arg === '--update') options.update = true
+    else if (arg === '--verify') options.verify = true
+    else if (arg === '--rollback') options.rollback = true
     else if (arg === '--help' || arg === '-h') options.help = true
     else if (arg === '--uninstall') options.uninstall = true
     else if (arg === '--target' || arg === '--skill-target' || arg === '--hermes-home') {
@@ -36,6 +41,12 @@ export function parseArgs(argv) {
   }
   if (options.force && !options.uninstall) {
     throw new Error('--force is only valid with --uninstall')
+  }
+  if ([options.uninstall, options.verify, options.rollback].filter(Boolean).length > 1) {
+    throw new Error('--uninstall, --verify, and --rollback are mutually exclusive')
+  }
+  if (options.dryRun && (options.uninstall || options.verify)) {
+    throw new Error('--dry-run is valid only with install, update, or rollback')
   }
 
   return options
@@ -61,6 +72,42 @@ export function dashboardDirectory(options, env = process.env) {
 
 export function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
+}
+export function isContainedPath(root, destination) {
+  const canonicalRoot = resolve(root)
+  const canonicalDestination = resolve(destination)
+  const path = relative(canonicalRoot, canonicalDestination)
+  return path === '' || (!path.startsWith('..') && !path.includes(`..${process.platform === 'win32' ? '\\' : '/'}`) && !path.startsWith('/'))
+}
+
+export async function assertSafeDestination(root, destination) {
+  if (!isContainedPath(root, destination)) {
+    throw new Error(`Installation destination escapes Hermes home: ${destination}`)
+  }
+
+  const configuredRoot = resolve(root)
+  const configuredDestination = resolve(destination)
+  const trustedParent = dirname(configuredRoot)
+  for (let current = configuredDestination; ; current = dirname(current)) {
+    try {
+      const info = await lstat(current)
+      if (info.isSymbolicLink()) throw new Error(`Installation destination has a symlinked parent: ${current}`)
+      if (!info.isDirectory() && current !== configuredDestination) {
+        throw new Error(`Installation destination has a non-directory parent: ${current}`)
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+    if (current === trustedParent) break
+    if (current === dirname(current)) break
+  }
+
+  const canonicalTrustedParent = await realpath(trustedParent)
+  const canonicalRoot = join(canonicalTrustedParent, basename(configuredRoot))
+  const canonicalDestination = join(canonicalTrustedParent, relative(trustedParent, configuredDestination))
+  if (!isContainedPath(canonicalTrustedParent, canonicalRoot) || !isContainedPath(canonicalRoot, canonicalDestination)) {
+    throw new Error(`Installation destination escapes Hermes home: ${destination}`)
+  }
 }
 
 export async function atomicWrite(path, value, mode = 0o644) {

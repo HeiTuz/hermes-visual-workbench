@@ -11,7 +11,7 @@
     "manifest.json",
     "skill/",
     "dashboard/",
-    "fixtures/",
+    "backend/",
     "scripts/",
     "README.md",
     "LICENSE"

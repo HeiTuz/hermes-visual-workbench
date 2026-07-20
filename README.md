@@ -53,15 +53,30 @@ The installer writes:
 ```text
 $HERMES_HOME/desktop-plugins/visual-workbench/plugin.js
 $HERMES_HOME/skills/midjourney-visual-workbench/SKILL.md
+$HERMES_HOME/plugins/visual-workbench/plugin.yaml
+$HERMES_HOME/plugins/visual-workbench/__init__.py
+$HERMES_HOME/plugins/visual-workbench/dashboard/manifest.json
+$HERMES_HOME/plugins/visual-workbench/dashboard/plugin_api.py
 ```
 
 When `HERMES_HOME` is unset, it uses `~/.hermes`.
 
-Hermes Desktop watches this directory and normally hot-loads the plugin. If it does not appear, open the command palette and run **Reload desktop plugins**.
+Hermes Desktop watches the desktop-plugin directory and normally hot-loads the JavaScript plugin. The Python backend/dashboard files require a backend restart; the installer prints the matching `hermes plugins enable visual-workbench` reminder.
 
 ### Update
 
-Run the install command again. Changed plugin and skill files are backed up separately before replacement. The install marker records both hashes.
+Run the install command again. Changed managed files and the prior marker are backed up with one transaction stamp before replacement; unchanged files remain part of that same prior state.
+
+### Rollback
+
+Preview or restore the exact newest update transaction:
+
+```bash
+npx --yes github:HeiTuz/hermes-visual-workbench -- --rollback --dry-run
+npx --yes github:HeiTuz/hermes-visual-workbench -- --rollback
+```
+
+Rollback restores only files changed by that transaction, keeps unchanged managed files, removes files that did not exist in the prior marker, and restores the prior marker bytes. It never combines per-file backups from different updates.
 
 ### Uninstall
 
@@ -69,7 +84,7 @@ Run the install command again. Changed plugin and skill files are backed up sepa
 npx --yes github:HeiTuz/hermes-visual-workbench -- --uninstall
 ```
 
-The uninstaller refuses to delete either managed file when its hash changed. It pins deletion to the expected plugin and skill paths instead of trusting paths stored in the marker. Use `--force` only when you intentionally want to remove local modifications.
+The uninstaller refuses to delete any of the six managed files when its hash changed. It pins deletion to the expected plugin, skill, backend, and dashboard paths instead of trusting paths stored in the marker. Use `--force` only when you intentionally want to remove local modifications.
 
 ### Custom Hermes home or test target
 
@@ -78,7 +93,7 @@ npx --yes github:HeiTuz/hermes-visual-workbench -- --hermes-home /path/to/.herme
 npx --yes github:HeiTuz/hermes-visual-workbench -- --target /tmp/visual-workbench --skill-target /tmp/midjourney-skill
 ```
 
-`--target` and `--skill-target` are a required pair so a test install cannot accidentally write the skill into the real Hermes home. Installation preflights regular files, rejects managed symlinks, and rolls back earlier writes if a later managed write fails.
+`--target` and `--skill-target` are a required pair so a test install cannot accidentally write the skill into the real Hermes home. Installation preflights every managed destination, backup, temporary file, marker, and ancestor; rejects containment escapes and symlinks; and rolls back earlier writes and directory creation if a later operation fails.
 
 ## Hermes compatibility
 
@@ -100,13 +115,27 @@ Until the upstream capability PR is merged, use a Hermes Desktop build containin
 
 The plugin owns workflow and presentation. Hermes core remains authoritative for privileged guest creation, navigation filtering, popup denial, permission handling, attachment handling, and PNG capture bounds.
 
-The plugin does not ship a Python backend and does not copy credentials.
+The package ships a bounded Python backend/dashboard bridge for local control and result receipts. It creates its own mode-`0600` local control token under the plugin directory and never copies external provider credentials.
 
 It uses the existing `persist:hermes-browser` partition as-is and never reads, exports, deletes, or migrates its cookies. Midjourney submit, upscale, and variation remain agent approval gates: the plugin displays state and QC but never clicks those controls itself.
 
 Midjourney automation is pinned to the Browser pane inside the Hermes Desktop window. The workflow scopes desktop actions to `app="Hermes"` and explicitly forbids external Chrome, Safari, Arc, Brave, Edge, and isolated `browser_*` sessions. If the internal pane is unavailable, it stops instead of falling back to another browser.
 
 The Browser pane displays a visible **Automation target** affordance. With the privileged guest active it reads `Automation target · Hermes internal Browser pane · persist:hermes-browser`; in iframe fallback it reads `Automation target unavailable`, and the packaged workflow hard-stops as `internal_pane_unavailable` instead of retargeting any external browser or isolated `browser_*` session. Agents must re-verify this affordance from a fresh `app="Hermes"` capture immediately before every pointer, focus, or type action.
+
+## Higgsfield CLI provenance bridge
+
+Higgsfield results can be brought into QC from the authenticated `higgsfield` CLI instead of an MCP tool card. `scripts/higgsfield-control.mjs` is a strictly read-only bridge: it maps only observation subcommands (`account status`, `generate list`, `soul-id list`, `model list`, `generate get`) and has no argv passthrough, so paid or mutating subcommands (`generate create`, `soul-id train`, `upload`, `publish`, `auth token`, ...) are unreachable by construction.
+
+```bash
+# Normalize one existing job into Visual Workbench provider evidence (signed query stripped)
+node scripts/higgsfield-control.mjs evidence --url "<result_url>"
+node scripts/higgsfield-control.mjs evidence --job-id "<job-id>"
+```
+
+The agent binds that provenance into QC over the command socket with `set-target { url, providerEvidence }` followed by `link { profileId: "higgsfield-image" }`. `set-target` accepts `providerEvidence` only when it normalizes to a recognized provider and its result URL path matches the target URL; the URL is sanitized before storage, so no signed query survives.
+
+The bridge never uses the `hf` alias, which on many hosts resolves to the HuggingFace CLI; it always invokes `higgsfield` (override with `HIGGSFIELD_BIN`). No generation is ever triggered from this bridge.
 
 ## Non-billable fixture E2E
 

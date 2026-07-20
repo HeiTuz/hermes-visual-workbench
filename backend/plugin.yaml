@@ -1,0 +1,7 @@
+manifest_version: 1
+name: visual-workbench
+version: 0.6.0
+kind: standalone
+host_version: ">=0.18.2"
+description: "Local Visual Workbench dashboard bridge for browser capture, QC, and bounded Midjourney control."
+author: "Yuna"

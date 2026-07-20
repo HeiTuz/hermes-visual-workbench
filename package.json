@@ -1,6 +1,6 @@
 {
   "name": "hermes-visual-workbench",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Midjourney A/B/C/D QC and independent Browser panes for Hermes Desktop",
   "type": "module",
   "bin": {
@@ -10,8 +10,10 @@
     "plugin.js",
     "manifest.json",
     "skill/",
-    "dashboard/",
-    "backend/",
+    "dashboard/manifest.json",
+    "dashboard/plugin_api.py",
+    "backend/__init__.py",
+    "backend/plugin.yaml",
     "scripts/",
     "README.md",
     "LICENSE"

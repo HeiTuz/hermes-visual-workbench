@@ -1,7 +1,7 @@
 {
   "id": "visual-workbench",
   "name": "Visual Workbench",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "entry": "plugin.js",
   "fullHostCapabilities": [
     "chat.imageActions",

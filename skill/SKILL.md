@@ -1,7 +1,7 @@
 ---
 name: midjourney-visual-workbench
 description: Prepare, capture, QC, select, and optionally upscale Midjourney results in Hermes Desktop without touching cookies or spending credits without current-turn approval.
-version: 0.6.0
+version: 0.7.0
 platforms: [macos]
 metadata:
   hermes:

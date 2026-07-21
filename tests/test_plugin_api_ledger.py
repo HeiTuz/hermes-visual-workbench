@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "dashboard" / "plugin_api.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "sidecar" / "app.py"
 SPEC = importlib.util.spec_from_file_location("visual_workbench_plugin_api_test", MODULE_PATH)
 assert SPEC and SPEC.loader
 plugin_api = importlib.util.module_from_spec(SPEC)
@@ -22,8 +22,10 @@ SPEC.loader.exec_module(plugin_api)
 class BillableLedgerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.previous_home = os.environ.get("HERMES_HOME")
-        os.environ["HERMES_HOME"] = self.temp.name
+        self.previous_home = os.environ.get("RENDERLINE_HOME")
+        os.environ["RENDERLINE_HOME"] = self.temp.name
+        (Path(self.temp.name) / "control.token").write_text("t" * 43, encoding="utf-8")
+        (Path(self.temp.name) / "control.token").chmod(0o600)
         self.receipt = "fixture-receipt"
         self.batch_fingerprint = "b" * 64
         ledger_path = plugin_api._safe_ledger_file(plugin_api._canonical_plugin_dir())
@@ -40,9 +42,9 @@ class BillableLedgerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         if self.previous_home is None:
-            os.environ.pop("HERMES_HOME", None)
+            os.environ.pop("RENDERLINE_HOME", None)
         else:
-            os.environ["HERMES_HOME"] = self.previous_home
+            os.environ["RENDERLINE_HOME"] = self.previous_home
         self.temp.cleanup()
 
     @staticmethod
@@ -141,7 +143,7 @@ class BillableLedgerTests(unittest.TestCase):
         second, existing = plugin_api._reserve_billable_command(self.command("submit-2"), "submit", "fixture-key-1234")
         self.assertTrue(existing)
         self.assertEqual(second, first)
-        ledger = Path(self.temp.name) / "plugins" / "renderline" / plugin_api._BILLABLE_LEDGER_FILE
+        ledger = Path(self.temp.name) / plugin_api._BILLABLE_LEDGER_FILE
         self.assertEqual(stat.S_IMODE(ledger.stat().st_mode), 0o600)
 
     def test_same_key_with_changed_request_fails_closed(self) -> None:
@@ -204,7 +206,7 @@ class BillableLedgerTests(unittest.TestCase):
 
 
     def test_v1_ledger_decodes_to_v2_shape(self) -> None:
-        ledger_dir = Path(self.temp.name) / "plugins" / "renderline"
+        ledger_dir = Path(self.temp.name)
         ledger_dir.mkdir(parents=True, exist_ok=True)
         entry = plugin_api._billable_record(self.command("submit-1"), "submit", "fixture-key-1234")
         (ledger_dir / plugin_api._BILLABLE_LEDGER_FILE).write_text(

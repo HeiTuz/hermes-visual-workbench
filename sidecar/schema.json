@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Renderline Sidecar Health",
+  "type": "object",
+  "required": ["ok", "service", "version", "schemaVersion", "commandClients"],
+  "properties": {
+    "ok": {"const": true},
+    "service": {"const": "renderline-sidecar"},
+    "version": {"const": "0.8.0"},
+    "schemaVersion": {"const": 1},
+    "commandClients": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

@@ -1,50 +1,57 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
-import types
+import os
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from fastapi.testclient import TestClient
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "dashboard" / "plugin_api.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "sidecar" / "app.py"
 
 
-def load_dashboard():
-    spec = importlib.util.spec_from_file_location("visual_workbench_plugin_api_compat", MODULE_PATH)
+def load_sidecar():
+    spec = importlib.util.spec_from_file_location("renderline_sidecar_compat", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(module)
     return module
 
 
-def host(version: str, helper):
-    package = types.ModuleType("hermes_cli")
-    package.__version__ = version
-    web_server = types.ModuleType("hermes_cli.web_server")
-    web_server._ws_auth_ok = helper
-    package.web_server = web_server
-    return {"hermes_cli": package, "hermes_cli.web_server": web_server}
+class SidecarCompatibilityTests(unittest.TestCase):
+    def test_auth_capability_is_owned_by_sidecar_not_hermes_version(self):
+        sidecar = load_sidecar()
+        with tempfile.TemporaryDirectory() as root:
+            previous = os.environ.get("RENDERLINE_HOME")
+            os.environ["RENDERLINE_HOME"] = root
+            try:
+                self.assertFalse(sidecar._host_auth_supported())
+                token = Path(root) / "control.token"
+                token.write_text("t" * 43, encoding="utf-8")
+                token.chmod(0o600)
+                self.assertTrue(sidecar._host_auth_supported())
+            finally:
+                if previous is None: os.environ.pop("RENDERLINE_HOME", None)
+                else: os.environ["RENDERLINE_HOME"] = previous
 
-
-class HostCompatibilityTests(unittest.TestCase):
-    def test_capability_predicate_is_side_effect_free_and_fail_closed(self):
-        dashboard = load_dashboard()
-        calls = []
-        supported = lambda ws: calls.append(ws) or True
-        matrix = [
-            ({}, False),
-            (host("0.18.1", supported), False),
-            (host("0.18.2", supported), True),
-            (host("0.19.0", supported), True),
-            (host("0.25.7", supported), True),
-            (host("0.19.0", object()), False),
-            (host("0.18.2", object()), False),
-        ]
-        for modules, expected in matrix:
-            with patch.dict(sys.modules, modules, clear=False):
-                self.assertEqual(dashboard._host_auth_supported(), expected)
-        self.assertEqual(calls, [])
+    def test_request_body_is_bounded_to_64_kib(self):
+        sidecar = load_sidecar()
+        with tempfile.TemporaryDirectory() as root:
+            previous = os.environ.get("RENDERLINE_HOME")
+            os.environ["RENDERLINE_HOME"] = root
+            try:
+                token = Path(root) / "control.token"
+                token.write_text("t" * 43, encoding="utf-8")
+                token.chmod(0o600)
+                response = TestClient(sidecar.app).post(
+                    "/command",
+                    content=b'{"padding":"' + (b"x" * 65536) + b'"}',
+                    headers={"Authorization": f"Bearer {token.read_text()}"},
+                )
+                self.assertEqual(response.status_code, 413)
+            finally:
+                if previous is None: os.environ.pop("RENDERLINE_HOME", None)
+                else: os.environ["RENDERLINE_HOME"] = previous
 
 
 if __name__ == "__main__":

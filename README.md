@@ -2,7 +2,7 @@
 
 A dockable Browser + task-aware quality-control workspace for Hermes Desktop.
 
-Renderline keeps the product workflow in a runtime plugin while Hermes core owns only privileged browser security and generic extension points.
+Renderline runs its durable command, result, state, and WebSocket control plane as an independent launchd sidecar. Hermes owns only privileged browser security, generic extension points, and thin replaceable adapters.
 
 ## What it gives you
 
@@ -57,15 +57,18 @@ $HERMES_HOME/plugins/renderline/plugin.yaml
 $HERMES_HOME/plugins/renderline/__init__.py
 $HERMES_HOME/plugins/renderline/dashboard/manifest.json
 $HERMES_HOME/plugins/renderline/dashboard/plugin_api.py
+~/Library/Application Support/Renderline/current/sidecar/
+~/Library/Application Support/Renderline/venv/
+~/Library/LaunchAgents/com.eusin.renderline.sidecar.plist
 ```
 
 When `HERMES_HOME` is unset, it uses `~/.hermes`.
 
-Hermes Desktop watches the desktop-plugin directory and normally hot-loads the JavaScript plugin. The Python backend/dashboard files require a backend restart; the installer prints the matching `hermes plugins enable renderline` reminder.
+The launchd sidecar owns the durable ledger, command queue, results, state, authenticated local API, and WebSocket on `127.0.0.1:47821`. It has its own Python virtual environment and survives Hermes backend restarts. Hermes Desktop watches the desktop-plugin directory and normally hot-loads the JavaScript plugin; the small backend adapter requires a backend restart when its contract changes.
 
 ### Update
 
-Run the install command again. Changed managed files and the prior marker are backed up with one transaction stamp before replacement; unchanged files remain part of that same prior state.
+Run the install command again. Hermes adapter files retain their transaction backup, while the sidecar installs an immutable versioned release and atomically advances its `current` symlink. The previous sidecar release remains available for rollback.
 
 ### Rollback
 
@@ -113,9 +116,9 @@ Until the upstream capability PR is merged, use a Hermes Desktop build containin
 
 ## Security boundary
 
-The plugin owns workflow and presentation. Hermes core remains authoritative for privileged guest creation, navigation filtering, popup denial, permission handling, attachment handling, and PNG capture bounds.
+The sidecar owns durable workflow coordination. The desktop plugin owns presentation. Hermes core remains authoritative only for privileged guest creation, navigation filtering, popup denial, permission handling, attachment handling, and PNG capture bounds.
 
-The package ships a bounded Python backend/dashboard bridge for local control and result receipts. It creates its own mode-`0600` local control token under the plugin directory and never copies external provider credentials.
+The package ships a bounded independent Python sidecar plus a thin Hermes proxy adapter. The sidecar creates a mode-`0600` control token under `~/Library/Application Support/Renderline`, binds only to loopback, and never copies external provider credentials. Hermes updates can replace or temporarily break the adapter without terminating the sidecar or deleting its durable state.
 
 It uses the existing `persist:hermes-browser` partition as-is and never reads, exports, deletes, or migrates its cookies. Midjourney submit, upscale, and variation remain agent approval gates: the plugin displays state and QC but never clicks those controls itself.
 

@@ -2,6 +2,7 @@
 
 import { access, copyFile, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 
 import {
   atomicWrite,
@@ -40,6 +41,15 @@ Options:
   --force             Uninstall even when a managed file was modified
   --help              Show this help
 `
+
+function runSidecar(action) {
+  const result = spawnSync(process.execPath, [join(PACKAGE_ROOT, 'scripts', 'sidecar.mjs'), action], {
+    encoding: 'utf8',
+    env: process.env,
+  })
+  if (result.stdout) process.stdout.write(result.stdout)
+  if (result.status !== 0) throw new Error((result.stderr || `sidecar ${action} failed`).trim())
+}
 
 async function exists(path) {
   try {
@@ -374,10 +384,20 @@ try {
       ...expectedManagedFiles(target, skillTarget, dashboardTarget).map(file => file.path)
     ]
     for (const destination of destinations) await assertSafeDestination(hermesHome, destination)
-    if (options.uninstall) await uninstall(target, skillTarget, dashboardTarget, options)
-    else if (options.verify) await verify(target, skillTarget, dashboardTarget)
-    else if (options.rollback) await rollback(target, skillTarget, dashboardTarget, options.dryRun)
-    else await install(target, skillTarget, dashboardTarget, options.dryRun)
+    const managesLiveSidecar = !options.hermesHome && !options.target && !options.dryRun
+    if (options.uninstall) {
+      await uninstall(target, skillTarget, dashboardTarget, options)
+      if (managesLiveSidecar) runSidecar('uninstall')
+    } else if (options.verify) {
+      await verify(target, skillTarget, dashboardTarget)
+      if (managesLiveSidecar) runSidecar('verify')
+    } else if (options.rollback) {
+      await rollback(target, skillTarget, dashboardTarget, options.dryRun)
+      if (managesLiveSidecar) runSidecar('rollback')
+    } else {
+      await install(target, skillTarget, dashboardTarget, options.dryRun)
+      if (managesLiveSidecar) runSidecar('install')
+    }
   }
 } catch (error) {
   console.error(`renderline: ${error instanceof Error ? error.message : String(error)}`)

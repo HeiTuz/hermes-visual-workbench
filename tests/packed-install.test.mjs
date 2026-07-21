@@ -94,31 +94,9 @@ assert "GET" in route_methods["/state"]
 assert "POST" in route_methods["/command"]
 assert "GET" in route_methods["/control/result"]
 assert "/commands" in route_methods
-
-class Socket:
-    def __init__(self):
-        self.accepted = False
-        self.closed = None
-    async def close(self, code):
-        self.closed = code
-    async def accept(self):
-        self.accepted = True
-    async def send_json(self, value):
-        pass
-    async def receive_text(self):
-        raise api.WebSocketDisconnect()
-
-unauthorized = Socket()
-web_server._ws_auth_ok = lambda ws: False
-asyncio.run(api.stream_commands(unauthorized))
-assert not unauthorized.accepted
-assert unauthorized.closed == api.http_status.WS_1008_POLICY_VIOLATION
-
-authorized = Socket()
-web_server._ws_auth_ok = lambda ws: True
-asyncio.run(api.stream_commands(authorized))
-assert authorized.accepted
-assert authorized.closed is None
+sidecar = (package_root / "sidecar" / "app.py").read_text()
+assert "renderline-sidecar" in sidecar
+assert "_BILLABLE_LEDGER_LOCK = asyncio.Lock()" in sidecar
 print("packed-host-probe-ok")
 `
 

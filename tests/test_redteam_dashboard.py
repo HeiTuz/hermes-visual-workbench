@@ -13,7 +13,7 @@ from unittest.mock import patch
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "dashboard" / "plugin_api.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "sidecar" / "app.py"
 SPEC = importlib.util.spec_from_file_location("visual_workbench_plugin_api_redteam", MODULE_PATH)
 assert SPEC and SPEC.loader
 plugin_api = importlib.util.module_from_spec(SPEC)
@@ -24,6 +24,7 @@ class Socket:
     def __init__(self):
         self.closed = []
         self.accepted = False
+        self.query_params = {}
 
     async def close(self, code):
         self.closed.append(code)
@@ -47,8 +48,10 @@ def host_modules(version: str, auth):
 class RedTeamDashboardTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.previous_home = os.environ.get("HERMES_HOME")
-        os.environ["HERMES_HOME"] = self.temp.name
+        self.previous_home = os.environ.get("RENDERLINE_HOME")
+        os.environ["RENDERLINE_HOME"] = self.temp.name
+        (Path(self.temp.name) / "control.token").write_text("t" * 43, encoding="utf-8")
+        (Path(self.temp.name) / "control.token").chmod(0o600)
         plugin_api._COMMAND_QUEUE.clear()
         plugin_api._COMMAND_CLIENTS.clear()
         plugin_api._RESULTS.clear()
@@ -57,9 +60,9 @@ class RedTeamDashboardTests(unittest.TestCase):
 
     def tearDown(self):
         if self.previous_home is None:
-            os.environ.pop("HERMES_HOME", None)
+            os.environ.pop("RENDERLINE_HOME", None)
         else:
-            os.environ["HERMES_HOME"] = self.previous_home
+            os.environ["RENDERLINE_HOME"] = self.previous_home
         self.temp.cleanup()
 
     @staticmethod
@@ -144,28 +147,18 @@ class RedTeamDashboardTests(unittest.TestCase):
             3,
         )
 
-    def test_ws_auth_fail_closed_before_accept_for_bad_host_conditions(self):
-        cases = [
-            ({}, "import failure"),
-            (host_modules("0.18.1", lambda _: True), "below floor host"),
-            (host_modules("0.18.2", None), "non-callable auth"),
-            (host_modules("0.20.5", None), "future host missing capability"),
-            (host_modules("0.18.2", lambda _: False), "wrong token"),
-        ]
-        for modules, label in cases:
-            with self.subTest(label=label):
-                socket = Socket()
-                with patch.dict(sys.modules, modules, clear=not bool(modules)):
-                    asyncio.run(plugin_api.stream_commands(socket))
-                self.assertEqual(socket.closed, [1008])
-                self.assertFalse(socket.accepted)
-        for version in ("0.18.2", "0.19.0", "0.20.5"):
-            with self.subTest(accepted=version):
-                socket = Socket()
-                with patch.dict(sys.modules, host_modules(version, lambda _: True), clear=False):
-                    asyncio.run(plugin_api.stream_commands(socket))
-                self.assertTrue(socket.accepted)
-                self.assertEqual(socket.closed, [])
+    def test_ws_auth_fail_closed_without_sidecar_token(self):
+        socket = Socket()
+        socket.query_params = {"token": "wrong"}
+        asyncio.run(plugin_api.stream_commands(socket))
+        self.assertEqual(socket.closed, [1008])
+        self.assertFalse(socket.accepted)
+
+        socket = Socket()
+        socket.query_params = {"token": "t" * 43}
+        asyncio.run(plugin_api.stream_commands(socket))
+        self.assertTrue(socket.accepted)
+        self.assertEqual(socket.closed, [])
 
     def test_result_read_sinks_never_return_signed_query_secrets(self):
         raw = "https://cdn.example.test/image.png?token=raw-token&sig=raw-sig&signature=raw-signature&expires=raw-expires&key=raw-key&auth=raw-auth"
@@ -174,7 +167,9 @@ class RedTeamDashboardTests(unittest.TestCase):
         plugin_api._RESULT_IDS.clear()
         plugin_api._LATEST_STATE = None
         with patch.object(plugin_api, "_host_auth_supported", return_value=True):
-            client = TestClient(plugin_api.router)
+            app = FastAPI()
+            app.include_router(plugin_api.router)
+            client = TestClient(app)
             self.assertEqual(client.post("/result", json=result).status_code, 200)
             for path in ("/result", "/control/result", "/state", "/result/redteam-result"):
                 with self.subTest(path=path):
@@ -195,7 +190,9 @@ class RedTeamDashboardTests(unittest.TestCase):
             "state": {"deep": deep, signed_key: "present"},
         }
         with patch.object(plugin_api, "_host_auth_supported", return_value=True):
-            client = TestClient(plugin_api.router)
+            app = FastAPI()
+            app.include_router(plugin_api.router)
+            client = TestClient(app)
             self.assertEqual(client.post("/result", json=result).status_code, 200)
             for path in ("/result", "/control/result", "/state", "/result/redteam-over-budget"):
                 with self.subTest(path=path):

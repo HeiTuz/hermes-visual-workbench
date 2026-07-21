@@ -30,8 +30,8 @@ jobs:
       - name: Smoke Bun runner
         shell: bash
         run: |
-          tarball=$(ls hermes-visual-workbench-*.tgz | head -1)
-          bunx --package "$GITHUB_WORKSPACE/$tarball" hermes-visual-workbench --target "$RUNNER_TEMP/bun-plugin" --skill-target "$RUNNER_TEMP/bun-skill"
+          tarball=$(ls renderline-*.tgz | head -1)
+          bunx --package "$GITHUB_WORKSPACE/$tarball" renderline --target "$RUNNER_TEMP/bun-plugin" --skill-target "$RUNNER_TEMP/bun-skill"
           test -f "$RUNNER_TEMP/bun-plugin/plugin.js"
           test -f "$RUNNER_TEMP/bun-skill/SKILL.md"
           test "$(sha256sum plugin.js | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/bun-plugin/plugin.js" | cut -d' ' -f1)"

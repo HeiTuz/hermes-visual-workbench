@@ -77,7 +77,7 @@ async function discoverBaseUrl(token) {
       const response = await fetch(`http://127.0.0.1:${port}/openapi.json`, { signal: AbortSignal.timeout(500) })
       const body = await response.json()
       if (!response.ok || body?.info?.title !== 'Hermes Agent') continue
-      const authorized = await fetch(`http://127.0.0.1:${port}/api/plugins/visual-workbench/control/result?cursor=0`, {
+      const authorized = await fetch(`http://127.0.0.1:${port}/api/plugins/renderline/control/result?cursor=0`, {
         headers: { authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(500)
       })
@@ -117,14 +117,14 @@ async function main() {
     return
   }
   const hermesHome = process.env.HERMES_HOME || join(os.homedir(), '.hermes')
-  const tokenPath = join(hermesHome, 'plugins', 'visual-workbench', 'control.token')
+  const tokenPath = join(hermesHome, 'plugins', 'renderline', 'control.token')
   const tokenStat = await stat(tokenPath)
-  if ((tokenStat.mode & 0o777) !== 0o600) throw new Error('Visual Workbench control token must have mode 0600')
+  if ((tokenStat.mode & 0o777) !== 0o600) throw new Error('Renderline control token must have mode 0600')
   const token = (await readFile(tokenPath, 'utf8')).trim()
-  if (token.length < 43) throw new Error('Visual Workbench control token is missing or invalid')
+  if (token.length < 43) throw new Error('Renderline control token is missing or invalid')
   options.baseUrl ||= await discoverBaseUrl(token)
 
-  const queued = await request(options.baseUrl, token, '/api/plugins/visual-workbench/command', {
+  const queued = await request(options.baseUrl, token, '/api/plugins/renderline/command', {
     method: 'POST',
     body: JSON.stringify(commandEnvelope(options, id))
   })
@@ -139,7 +139,7 @@ async function main() {
     const receiptPage = await request(
       options.baseUrl,
       token,
-      `/api/plugins/visual-workbench/control/result?cursor=${cursor}`
+      `/api/plugins/renderline/control/result?cursor=${cursor}`
     )
     const result = Array.isArray(receiptPage?.results)
       ? receiptPage.results.find(receipt => receipt?.id === id)
@@ -153,7 +153,7 @@ async function main() {
     if (Number.isInteger(receiptPage?.nextCursor) && receiptPage.nextCursor >= cursor) cursor = receiptPage.nextCursor
     await new Promise(resolve => setTimeout(resolve, 250))
   }
-  throw new Error(`Timed out waiting for Visual Workbench ${options.command} result`)
+  throw new Error(`Timed out waiting for Renderline ${options.command} result`)
 }
 
 main().catch(error => {

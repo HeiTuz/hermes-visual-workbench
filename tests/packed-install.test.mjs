@@ -72,15 +72,15 @@ class Context:
 context = Context()
 backend.register(context)
 assert token_routes == [
-    "/api/plugins/visual-workbench/command",
-    "/api/plugins/visual-workbench/control/result",
+    "/api/plugins/renderline/command",
+    "/api/plugins/renderline/control/result",
 ]
 assert len(context.providers) == 1
 provider = context.providers[0]
 assert provider.verify_token(token="wrong") is None
 principal = provider.verify_token(token=provider._token)
-assert principal and principal.principal == "visual-workbench-local-control"
-token_path = home / "plugins" / "visual-workbench" / "control.token"
+assert principal and principal.principal == "renderline-local-control"
+token_path = home / "plugins" / "renderline" / "control.token"
 assert token_path.is_file()
 assert os.stat(token_path).st_mode & 0o077 == 0
 
@@ -127,7 +127,7 @@ function command(command, args, cwd) {
 }
 
 test('packed archive contains installer sources and installs from packed bytes', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'hermes-visual-workbench-packed-'))
+  const directory = await mkdtemp(join(tmpdir(), 'renderline-packed-'))
   t.after(() => rm(directory, { force: true, recursive: true }))
 
   const packed = command('npm', ['pack', '--pack-destination', directory], root)
@@ -143,19 +143,19 @@ test('packed archive contains installer sources and installs from packed bytes',
   await mkdir(project)
   const npmInstalled = command('npm', ['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', archive], project)
   assert.equal(npmInstalled.status, 0, npmInstalled.stderr)
-  const packageRoot = join(project, 'node_modules', 'hermes-visual-workbench')
+  const packageRoot = join(project, 'node_modules', 'renderline')
   const home = join(directory, 'home')
-  const installer = join(project, 'node_modules', '.bin', 'hermes-visual-workbench')
+  const installer = join(project, 'node_modules', '.bin', 'renderline')
   const run = args => command(installer, ['--hermes-home', home, ...args], project)
 
   assert.equal(run(['--dry-run']).status, 0)
   const installed = run(['--install'])
   assert.equal(installed.status, 0, installed.stderr)
-  assert.equal(await readFile(join(home, 'desktop-plugins', 'visual-workbench', 'plugin.js'), 'utf8'), await readFile(join(packageRoot, 'plugin.js'), 'utf8'))
+  assert.equal(await readFile(join(home, 'desktop-plugins', 'renderline', 'plugin.js'), 'utf8'), await readFile(join(packageRoot, 'plugin.js'), 'utf8'))
   assert.equal(run(['--verify']).status, 0)
   const repeated = run(['--install'])
   assert.equal(repeated.status, 0, repeated.stderr)
-  assert.match(repeated.stdout, /Verified Visual Workbench/)
+  assert.match(repeated.stdout, /Verified Renderline/)
 
   const hostProbe = command('python3', ['-c', PACKED_HOST_PROBE, packageRoot, home], project)
   assert.equal(hostProbe.status, 0, hostProbe.stderr)
@@ -168,12 +168,12 @@ test('packed archive contains installer sources and installs from packed bytes',
   assert.match(packedPlugin, /ctx\.socket\('\/commands'/)
   for (const [relative, contents] of [
     ['plugin.js', '// prior packed plugin\n'],
-    ['skills/midjourney-visual-workbench/SKILL.md', '# prior packed skill\n'],
-    ['plugins/visual-workbench/plugin.yaml', 'prior packed manifest\n'],
-    ['plugins/visual-workbench/__init__.py', '# prior packed backend\n'],
-    ['plugins/visual-workbench/dashboard/manifest.json', '{}\n'],
-    ['plugins/visual-workbench/dashboard/plugin_api.py', '# prior packed api\n']
-  ]) await writeFile(join(home, 'desktop-plugins', 'visual-workbench', relative), contents).catch(async error => {
+    ['skills/renderline/SKILL.md', '# prior packed skill\n'],
+    ['plugins/renderline/plugin.yaml', 'prior packed manifest\n'],
+    ['plugins/renderline/__init__.py', '# prior packed backend\n'],
+    ['plugins/renderline/dashboard/manifest.json', '{}\n'],
+    ['plugins/renderline/dashboard/plugin_api.py', '# prior packed api\n']
+  ]) await writeFile(join(home, 'desktop-plugins', 'renderline', relative), contents).catch(async error => {
     if (error.code !== 'ENOENT') throw error
     await writeFile(join(home, relative), contents)
   })
@@ -181,5 +181,5 @@ test('packed archive contains installer sources and installs from packed bytes',
   assert.equal(updated.status, 0, updated.stderr)
   const rolledBack = run(['--rollback'])
   assert.equal(rolledBack.status, 0, rolledBack.stderr)
-  assert.equal(await readFile(join(home, 'desktop-plugins', 'visual-workbench', 'plugin.js'), 'utf8'), '// prior packed plugin\n')
+  assert.equal(await readFile(join(home, 'desktop-plugins', 'renderline', 'plugin.js'), 'utf8'), '// prior packed plugin\n')
 })

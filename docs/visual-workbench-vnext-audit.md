@@ -1,6 +1,6 @@
-# Visual Workbench vNext — Audit
+# Renderline vNext — Audit
 
-Repo: hermes-visual-workbench, `main` @ fef8ee4, v0.2.1. Evidence lines cite the files as of this commit.
+Repo: renderline, `main` @ fef8ee4, v0.2.1. Evidence lines cite the files as of this commit.
 
 ## Architecture audit
 
@@ -15,7 +15,7 @@ Repo: hermes-visual-workbench, `main` @ fef8ee4, v0.2.1. Evidence lines cite the
 | `plugin.js` zone 2 — `WORKBENCH_CORE` (81–351) | Persisted-state model (schema v2), QC document schema v1 validator, job state machine, lenient restore/repair | markers at `plugin.js:81` and `plugin.js:351` |
 | `plugin.js` zone 3 — UI (353–1184) | Store (`setState`/`useSyncExternalStore`), `BrowserPane`/`BrowserPanel`/`ViewportStage`/`BrowserSurface`, `QcPane`/`MidjourneyQcPane`/`CandidateCard`/`JobEditor`/`CheckRow`, `register()` contributions | `plugin.js:353,502,555,699,824,869,970,1066,1101` |
 | `scripts/qc-core.mjs` (283 lines) | Standalone, exported duplicate of the core: `validateQcDocument`, `migratePersistedState`, `transitionJob`, `nextJobStates`, `qcDocumentFromState`, constants | whole file |
-| `scripts/lib.mjs`, `scripts/install.mjs` | Hash-pinned installer/uninstaller with marker `.hermes-visual-workbench-install.json`; orthogonal to product model | `scripts/install.mjs`, `tests/install.test.mjs` |
+| `scripts/lib.mjs`, `scripts/install.mjs` | Hash-pinned installer/uninstaller with marker `.renderline-install.json`; orthogonal to product model | `scripts/install.mjs`, `tests/install.test.mjs` |
 | `scripts/fixture-e2e.mjs` | Non-billable artifact job generator; consumes `qc-core.mjs` `validateQcDocument` | `scripts/fixture-e2e.mjs:7` |
 | `tests/*.test.mjs` | qc-core unit + parity + installer + fixture e2e; gate `npm test` = `node --check plugin.js && node --test tests/*.test.mjs` | `package.json` scripts |
 
@@ -64,7 +64,7 @@ Midjourney hard-coding (the coupling to break, with exact sites):
 3. `CandidateCard` renders dimension labels from `QC_PROFILES.midjourney.checks` directly (`plugin.js:940` region) — UI reads the Midjourney profile even though it renders per-candidate structured review.
 4. `QcPane` hard-branches: `if (workbench.qcProfile === 'midjourney') return jsx(MidjourneyQcPane, …)` (`plugin.js:1069`). Every other profile gets only the flat `CheckRow` checklist; structured candidate review is unreachable for Higgsfield profiles despite the state model supporting it.
 5. `qcProfileFor(input)` routes by tool-name substring sniffing (`'midjourney'`, `'higgsfield'`, `'generate_video'`) (`plugin.js:410-415`) — a de-facto provider router with no registry.
-6. Cosmetic/peripheral: capture default filename `${state.job.id || 'midjourney'}-…`, fixture artifacts under `artifacts/midjourney/<job-id>/`, skill named `midjourney-visual-workbench`.
+6. Cosmetic/peripheral: capture default filename `${state.job.id || 'midjourney'}-…`, fixture artifacts under `artifacts/midjourney/<job-id>/`, skill named `renderline`.
 
 Net: the *data model* is ~80% provider-agnostic already; the provider coupling lives in (a) the fixed dimension vocabulary inside the schema-v1 validator and (b) the UI routing/labeling. That makes an adapter extraction cheap in the core and mostly additive in the UI — but the strict schema v1 (exact 8 dimension keys, exactly 4 candidates) is a frozen contract that adapters must treat as the *Midjourney adapter's wire format*, not as the generic model.
 
@@ -136,8 +136,8 @@ Evidence base: `plugin.js` @ fef8ee4 (v0.2.1, read in full), `scripts/qc-core.mj
 
 | Surface | Registration | Behavior |
 | --- | --- | --- |
-| Browser pane | `panes` area, id `visual-workbench:browser`, right dock, 560px | `BrowserPane` (plugin.js:699) |
-| Quality Control pane | `panes` area, id `visual-workbench:qc`, docked right of Browser, 330px | `QcPane` (plugin.js:1066) |
+| Browser pane | `panes` area, id `renderline:browser`, right dock, 560px | `BrowserPane` (plugin.js:699) |
+| Quality Control pane | `panes` area, id `renderline:qc`, docked right of Browser, 330px | `QcPane` (plugin.js:1066) |
 | Titlebar toggles | `titleBar.appControls` order 10 (globe → Browser) and 20 (checklist → QC) | `PaneTitlebarToggle` (plugin.js:373). Each button calls `host.panes.toggle(paneId)` for **its own pane only** — pane independence is structural, not incidental. `aria-pressed` mirrors open state. Renders `null` when `host.panes.toggle` is absent (pre-#65647 hosts). |
 | Chat-image action: **Open as Result** | `chat.imageActions` order 10 | Sets `browserPanels.result.url`, opens Browser pane. |
 | Chat-image action: **Set as Reference** | order 20 | Sets `browserPanels.reference.url`, forces `browserSplit: true`, opens Browser pane. |
@@ -206,7 +206,7 @@ Coupling observation for Lane A's thesis: the QC pane's IA already forks at exac
 
 ## Acceptance criteria
 
-Slice names follow the three candidates fixed in the context snapshot (`.gjc/context/visual-workbench-vnext-20260717T000000Z.md`, "Unknowns"): S1 provider-adapter core extraction, S2 multi-job queue, S3 review-session UX. Lane A owns the final ranking; criteria below are defined for all three so the leader can freeze any of them without another round trip.
+Slice names follow the three candidates fixed in the context snapshot (`.gjc/context/renderline-vnext-20260717T000000Z.md`, "Unknowns"): S1 provider-adapter core extraction, S2 multi-job queue, S3 review-session UX. Lane A owns the final ranking; criteria below are defined for all three so the leader can freeze any of them without another round trip.
 
 ### S1 — Provider-adapter core extraction (Lane B recommendation: rank 1)
 

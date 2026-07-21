@@ -1,8 +1,8 @@
-# Hermes Visual Workbench
+# Hermes Renderline
 
 A dockable Browser + task-aware quality-control workspace for Hermes Desktop.
 
-Visual Workbench keeps the product workflow in a runtime plugin while Hermes core owns only privileged browser security and generic extension points.
+Renderline keeps the product workflow in a runtime plugin while Hermes core owns only privileged browser security and generic extension points.
 
 ## What it gives you
 
@@ -32,36 +32,36 @@ Visual Workbench keeps the product workflow in a runtime plugin while Hermes cor
 - Higgsfield structured results render their real batch count (up to A–D) instead of forcing four empty candidate cards; Midjourney remains strict A/B/C/D and visibly read-only.
 - Design QC can run a non-mutating CDP page preflight for current-viewport horizontal overflow, broken images, missing alt text, and unlabeled controls; visual contrast and aesthetic judgments remain manual.
 - Capture evidence is invalidated when its Browser URL changes, preventing a stale screenshot from being presented as proof for a new target.
-- Packaged `midjourney-visual-workbench` Hermes workflow skill and deterministic non-billable fixture runner.
+- Packaged `renderline` Hermes workflow skill and deterministic non-billable fixture runner.
 
 The preview is scaled to fit its pane, but the guest page still receives the selected viewport as its real `window.innerWidth` / `window.innerHeight`.
 
 ## Install
 
 ```bash
-npx --yes github:HeiTuz/hermes-visual-workbench
+npx --yes github:HeiTuz/Renderline
 ```
 
 Or with Bun:
 
 ```bash
-bunx github:HeiTuz/hermes-visual-workbench
+bunx github:HeiTuz/Renderline
 ```
 
 The installer writes:
 
 ```text
-$HERMES_HOME/desktop-plugins/visual-workbench/plugin.js
-$HERMES_HOME/skills/midjourney-visual-workbench/SKILL.md
-$HERMES_HOME/plugins/visual-workbench/plugin.yaml
-$HERMES_HOME/plugins/visual-workbench/__init__.py
-$HERMES_HOME/plugins/visual-workbench/dashboard/manifest.json
-$HERMES_HOME/plugins/visual-workbench/dashboard/plugin_api.py
+$HERMES_HOME/desktop-plugins/renderline/plugin.js
+$HERMES_HOME/skills/renderline/SKILL.md
+$HERMES_HOME/plugins/renderline/plugin.yaml
+$HERMES_HOME/plugins/renderline/__init__.py
+$HERMES_HOME/plugins/renderline/dashboard/manifest.json
+$HERMES_HOME/plugins/renderline/dashboard/plugin_api.py
 ```
 
 When `HERMES_HOME` is unset, it uses `~/.hermes`.
 
-Hermes Desktop watches the desktop-plugin directory and normally hot-loads the JavaScript plugin. The Python backend/dashboard files require a backend restart; the installer prints the matching `hermes plugins enable visual-workbench` reminder.
+Hermes Desktop watches the desktop-plugin directory and normally hot-loads the JavaScript plugin. The Python backend/dashboard files require a backend restart; the installer prints the matching `hermes plugins enable renderline` reminder.
 
 ### Update
 
@@ -72,8 +72,8 @@ Run the install command again. Changed managed files and the prior marker are ba
 Preview or restore the exact newest update transaction:
 
 ```bash
-npx --yes github:HeiTuz/hermes-visual-workbench -- --rollback --dry-run
-npx --yes github:HeiTuz/hermes-visual-workbench -- --rollback
+npx --yes github:HeiTuz/Renderline -- --rollback --dry-run
+npx --yes github:HeiTuz/Renderline -- --rollback
 ```
 
 Rollback restores only files changed by that transaction, keeps unchanged managed files, removes files that did not exist in the prior marker, and restores the prior marker bytes. It never combines per-file backups from different updates.
@@ -81,7 +81,7 @@ Rollback restores only files changed by that transaction, keeps unchanged manage
 ### Uninstall
 
 ```bash
-npx --yes github:HeiTuz/hermes-visual-workbench -- --uninstall
+npx --yes github:HeiTuz/Renderline -- --uninstall
 ```
 
 The uninstaller refuses to delete any of the six managed files when its hash changed. It pins deletion to the expected plugin, skill, backend, and dashboard paths instead of trusting paths stored in the marker. Use `--force` only when you intentionally want to remove local modifications.
@@ -89,8 +89,8 @@ The uninstaller refuses to delete any of the six managed files when its hash cha
 ### Custom Hermes home or test target
 
 ```bash
-npx --yes github:HeiTuz/hermes-visual-workbench -- --hermes-home /path/to/.hermes
-npx --yes github:HeiTuz/hermes-visual-workbench -- --target /tmp/visual-workbench --skill-target /tmp/midjourney-skill
+npx --yes github:HeiTuz/Renderline -- --hermes-home /path/to/.hermes
+npx --yes github:HeiTuz/Renderline -- --target /tmp/renderline --skill-target /tmp/midjourney-skill
 ```
 
 `--target` and `--skill-target` are a required pair so a test install cannot accidentally write the skill into the real Hermes home. Installation preflights every managed destination, backup, temporary file, marker, and ancestor; rejects containment escapes and symlinks; and rolls back earlier writes and directory creation if a later operation fails.
@@ -156,7 +156,7 @@ $HERMES_HOME/artifacts/midjourney/<job-id>/
 
 ```bash
 npm test
-node scripts/install.mjs --target /tmp/visual-workbench --skill-target /tmp/midjourney-skill
+node scripts/install.mjs --target /tmp/renderline --skill-target /tmp/midjourney-skill
 ```
 
 Runtime plugin source is plain ESM: no build step and no bundled copy of React or the Hermes SDK.

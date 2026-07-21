@@ -15,7 +15,7 @@ import {
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
-const PLUGIN_ID = 'visual-workbench'
+const PLUGIN_ID = 'renderline'
 const PLUGIN_VERSION = '0.7.0'
 const BROWSER_PANE_ID = `${PLUGIN_ID}:browser`
 const QC_PANE_ID = `${PLUGIN_ID}:qc`
@@ -2098,7 +2098,7 @@ function BrowserSurface({ panelId, url, viewport }) {
     sandbox: 'allow-forms allow-scripts allow-same-origin',
     src: url,
     style: { border: 0, height: '100%', width: '100%' },
-    title: 'Visual Workbench Browser'
+    title: 'Renderline Browser'
   })
 }
 
@@ -3030,7 +3030,7 @@ function QcPane() {
 
 export default {
   id: PLUGIN_ID,
-  name: 'Visual Workbench',
+  name: 'Renderline',
   version: PLUGIN_VERSION,
   register(ctx) {
     pluginContext = ctx

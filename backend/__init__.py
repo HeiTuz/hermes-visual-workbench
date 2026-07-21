@@ -1,4 +1,4 @@
-"""Visual Workbench local bearer-token provider for its bounded control API."""
+"""Renderline local bearer-token provider for its bounded control API."""
 from __future__ import annotations
 
 import hmac
@@ -15,11 +15,11 @@ from hermes_cli.dashboard_auth.base import (
     TokenPrincipal,
 )
 
-_PLUGIN_NAME = "visual-workbench"
+_PLUGIN_NAME = "renderline"
 _TOKEN_FILE = "control.token"
 _TOKEN_ROUTES = (
-    "/api/plugins/visual-workbench/command",
-    "/api/plugins/visual-workbench/control/result",
+    "/api/plugins/renderline/command",
+    "/api/plugins/renderline/control/result",
 )
 
 
@@ -38,12 +38,12 @@ def _read_or_create_token() -> str:
     except FileExistsError:
         info = token_path.lstat()
         if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-            raise RuntimeError(f"Visual Workbench control token must be a regular file: {token_path}")
+            raise RuntimeError(f"Renderline control token must be a regular file: {token_path}")
         if info.st_mode & 0o077:
-            raise RuntimeError(f"Visual Workbench control token permissions are too broad: {token_path}")
+            raise RuntimeError(f"Renderline control token permissions are too broad: {token_path}")
         token = token_path.read_text(encoding="utf-8").strip()
         if len(token) < 43:
-            raise RuntimeError("Visual Workbench control token is missing or too short")
+            raise RuntimeError("Renderline control token is missing or too short")
         return token
 
     try:
@@ -56,38 +56,38 @@ def _read_or_create_token() -> str:
 
 
 class VisualWorkbenchTokenProvider(DashboardAuthProvider):
-    name = "visual-workbench-local"
-    display_name = "Visual Workbench local control"
+    name = "renderline-local"
+    display_name = "Renderline local control"
     supports_token = True
     supports_session = False
 
     def __init__(self, token: str) -> None:
         if len(token) < 43:
-            raise ValueError("Visual Workbench control token must contain at least 256 bits")
+            raise ValueError("Renderline control token must contain at least 256 bits")
         self._token = token
 
     def verify_token(self, *, token: str) -> Optional[TokenPrincipal]:
         if token and hmac.compare_digest(token.encode("utf-8"), self._token.encode("utf-8")):
             return TokenPrincipal(
-                principal="visual-workbench-local-control",
+                principal="renderline-local-control",
                 provider=self.name,
-                scopes=("visual-workbench-control",),
+                scopes=("renderline-control",),
             )
         return None
 
     def start_login(self, *, redirect_uri: str) -> LoginStart:
-        raise NotImplementedError("Visual Workbench local control has no interactive login flow")
+        raise NotImplementedError("Renderline local control has no interactive login flow")
 
     def complete_login(
         self, *, code: str, state: str, code_verifier: str, redirect_uri: str
     ) -> Session:
-        raise NotImplementedError("Visual Workbench local control has no interactive login flow")
+        raise NotImplementedError("Renderline local control has no interactive login flow")
 
     def verify_session(self, *, access_token: str) -> Optional[Session]:
         return None
 
     def refresh_session(self, *, refresh_token: str) -> Session:
-        raise NotImplementedError("Visual Workbench local control has no interactive login flow")
+        raise NotImplementedError("Renderline local control has no interactive login flow")
 
     def revoke_session(self, *, refresh_token: str) -> None:
         return None

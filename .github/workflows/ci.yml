@@ -16,6 +16,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dashboard test dependencies
+        run: python -m pip install 'fastapi>=0.100,<1'
       - uses: oven-sh/setup-bun@v2
       - run: npm test
       - name: Pack and smoke npm runner

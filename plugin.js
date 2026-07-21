@@ -16,7 +16,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const PLUGIN_ID = 'renderline'
-const PLUGIN_VERSION = '0.7.2'
+const PLUGIN_VERSION = '0.7.3'
 const BROWSER_PANE_ID = `${PLUGIN_ID}:browser`
 const QC_PANE_ID = `${PLUGIN_ID}:qc`
 const CLOSED_PANE_ATOM = atom(false)

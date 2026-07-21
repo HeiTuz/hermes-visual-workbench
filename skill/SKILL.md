@@ -1,7 +1,7 @@
 ---
 name: renderline
-description: Prepare, capture, QC, select, and optionally upscale Midjourney results in Hermes Desktop without touching cookies or spending credits without current-turn approval.
-version: 0.7.0
+description: Generate through Higgsfield and Midjourney, then capture, QC, compare, select, and repair across those results plus materialized ImgGen2 artifacts without touching credentials or spending credits without current-turn approval.
+version: 0.7.2
 platforms: [macos]
 metadata:
   hermes:
@@ -9,13 +9,21 @@ metadata:
     category: creative
 ---
 
-# Midjourney Renderline
+# Renderline
 
-Use this skill when the user asks to prepare or run a Midjourney job, compare a four-image grid, perform A/B/C/D QC, or import QC into the Renderline pane.
+Use this skill for Higgsfield or Midjourney generation, or for QC/comparison/selection of any materialized image or video—including artifacts produced by ImgGen2. Renderline is the final visual-quality authority; it does not compile prompts or silently switch providers.
+
+## Lane ownership
+
+- **Higgsfield:** Renderline owns the production lane and QC surface. Use the native Higgsfield MCP procedure for model discovery, upload, generation, and terminal job evidence; then link the exact completed result in Renderline before judging it.
+- **Midjourney:** Renderline owns the authenticated Hermes Desktop Browser-pane workflow and the existing approval-gated grid/QC procedure below.
+- **ImgGen2:** ImgGen2 owns direct-native execution only. It hands Renderline the materialized output path, provider, model, prompt digest, and input-reference summary. Renderline imports the exact file or delivery URL, captures evidence, then judges it under the same QC authority as Higgsfield and Midjourney.
+
+There is no automatic cross-lane fallback. A provider change, paid rerun, Midjourney variation/upscale, or new Higgsfield job needs the approval appropriate to that action.
 
 ## Hard boundaries
 
-- Resolve `$HERMES_HOME` first; default to `~/.hermes`. Store job artifacts only at `$HERMES_HOME/artifacts/midjourney/<job-id>/`.
+- Resolve `$HERMES_HOME` first; default to `~/.hermes`. Store run evidence under `$HERMES_HOME/artifacts/renderline/<job-id>/`; preserve the original materialized ImgGen2 artifact in place and record its path/hash rather than moving it.
 - Never read, print, export, delete, move, or migrate Chromium cookies, tokens, Local State, IndexedDB, or credentials. Authentication is verified visually only.
 - Never enter credentials.
 - A Midjourney submit, upscale, or variation is credit-consuming. Perform it only when the user's current message explicitly approves that exact action and scope. Old approval, a saved job, or this skill is not approval.
@@ -47,6 +55,12 @@ Any nonterminal state may terminate as `FAILED` or `CANCELLED`. Do not skip live
 10. Assign each candidate exactly one disposition: `PASS`, `REPAIR`, or `REJECT`. Record concise evidence and a repair prompt when repairable.
 11. Produce strict QC JSON matching Renderline schema version 1. In the already-linked Quality Control pane, confirm **Midjourney QC**, paste into **Import QC JSON**, and press **Import QC JSON**. Confirm the target card, capture evidence, four candidates, and selected recommendation render together.
 12. Recommend one candidate. Upscale or vary only with fresh explicit approval. Download/attach only the chosen result and record visible result references plus local paths.
+
+## ImgGen2 artifact intake
+
+For a direct-native artifact, do not regenerate or rehost it. Require the materialized local path plus provider, model, prompt digest, and input-reference summary from ImgGen2. Verify the file exists and is non-empty, point the Renderline Result target to that exact absolute path (the pane resolves local paths as `file://`), attach `imggen2-native` provider evidence, then `link → capture → score-candidate → select-candidate`. Renderline selects `Native Image QC` or `Native Video QC` from that evidence; never force the artifact into a Higgsfield or Midjourney profile. Read back the linked target before reporting a verdict. If the target cannot render, report `artifact_intake_failed`; do not score from a filename, prior screenshot, or remembered prompt.
+
+This intake does not pretend an ImgGen2 file is a Higgsfield or Midjourney job. Preserve provider provenance as supplied, make any provenance gap explicit.
 
 ## Strict QC document
 
@@ -92,8 +106,12 @@ Poll `GET /result/<id>` until it returns `200` rather than `{ "pending": true }`
 
 Use an existing feed screenshot or the package fixture. A valid dry run is: create artifact directory → write request/provenance → copy capture → validate/write QC JSON → import it through the real pane → show the recommendation. Explicitly record `billableActionsExecuted: []`.
 
+Zero-cost E2E smoke (isolated, repeatable): resolve the Hermes backend interpreter first (`PY="$HERMES_HOME/hermes-agent/venv/bin/python"`; fall back to `python3` only when that file is absent), then run `$PY "$HERMES_HOME/plugins/renderline-telegram/e2e_smoke.py"`. This avoids a system-Python/compiled-`pydantic_core` mismatch while exercising the same FastAPI environment as Desktop. The smoke runs the full simulated chain — bridge create/attach/review → `request_selection(B)` → Desktop relay ack on the real WORKBENCH_CORE → `plugin_api` ack write → readback → bridge commit — plus an imggen2-native provenance persist/restore round-trip check (`providerJobId` must survive an emulated Desktop restart) and negative paths (stale revision, cross-scope, used reply token), entirely under a temp `HERMES_HOME`, and proves production state is untouched. Prints `E2E-OK` on success. Run both regression suites with the same `$PY`: `-m unittest discover -s "$HERMES_HOME/plugins/renderline-telegram" -p 'test_*.py'` and `-s "$HERMES_HOME/plugins/renderline/dashboard" -p 'test_*.py'`. For current Higgsfield CLI readback use `higgsfield generate list --json` or `higgsfield generate get <job_id> --json`; legacy `show_generations` is not a valid command.
+
 ## Recovery
 
+- Managed install drift is repaired by `~/.hermes/scripts/renderline-update-reconcile.py`, launched by `com.eusin.renderline.reconcile` on Hermes/Renderline update paths and every five minutes. It runs the canonical source suite, performs a transactional `--update`, verifies managed hashes and dashboard tests, and rolls back on post-install failure. Unknown compatibility failures create `~/.hermes/state/renderline-reconcile/needs-adaptive-patch.json`; the local `Renderline adaptive compatibility repair` cron patches only the canonical source, reruns the full suite, and invokes the same transactional reconciler.
+- Inspect `~/.hermes/state/renderline-reconcile/latest.json` and `~/.hermes/logs/renderline-reconcile.log` before manual intervention. Use `node ~/src/Renderline/scripts/install.mjs --verify` for an immediate managed-file check. Do not hand-edit installed copies; patch `~/src/Renderline`, test, then run the reconciler with `--force`.
 - Login missing: stop and ask the user to authenticate manually in the persistent Browser pane.
 - Import rejected: preserve the pane's prior state, fix only the reported schema violation, and import once more.
 - Internal Browser pane unavailable: stop as `internal_pane_unavailable`; do not launch or reuse an external browser.

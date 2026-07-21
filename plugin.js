@@ -16,7 +16,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const PLUGIN_ID = 'renderline'
-const PLUGIN_VERSION = '0.7.0'
+const PLUGIN_VERSION = '0.7.2'
 const BROWSER_PANE_ID = `${PLUGIN_ID}:browser`
 const QC_PANE_ID = `${PLUGIN_ID}:qc`
 const CLOSED_PANE_ATOM = atom(false)
@@ -48,9 +48,36 @@ const QC_PROFILES = {
       ['framing', 'Framing & crop']
     ]
   },
+  'imggen2-image': {
+    label: 'Native Image QC',
+    description: 'Prompt fidelity, subject or product accuracy, geometry, artifacts, critical color, text, and framing for direct-native outputs.',
+    checks: [
+      ['prompt', 'Prompt adherence'],
+      ['identity', 'Subject / product identity'],
+      ['anatomy', 'Anatomy & geometry'],
+      ['artifacts', 'Artifacts & cleanup'],
+      ['color', 'Color grade & critical colors'],
+      ['text', 'Text, logo & labels'],
+      ['framing', 'Framing & crop']
+    ]
+  },
   'higgsfield-video': {
     label: 'Higgsfield Video QC',
     description: 'Temporal consistency, motion, camera, audio sync, and generation artifacts.',
+    checks: [
+      ['prompt', 'Prompt adherence'],
+      ['identity', 'Identity continuity'],
+      ['motion', 'Motion & physics'],
+      ['camera', 'Camera continuity'],
+      ['temporal', 'Temporal consistency'],
+      ['audio', 'Lip sync & audio'],
+      ['artifacts', 'Artifacts & flicker'],
+      ['framing', 'Framing & crop']
+    ]
+  },
+  'imggen2-video': {
+    label: 'Native Video QC',
+    description: 'Prompt fidelity, identity continuity, motion, camera, temporal consistency, audio, artifacts, and framing for direct-native outputs.',
     checks: [
       ['prompt', 'Prompt adherence'],
       ['identity', 'Identity continuity'],
@@ -84,7 +111,7 @@ const QC_DOCUMENT_SCHEMA_VERSION = 1
 const MAX_QC_JSON_BYTES = 64 * 1024
 const CANDIDATE_IDS = ['A', 'B', 'C', 'D']
 const DISPOSITIONS = ['PASS', 'REPAIR', 'REJECT']
-const QC_PROFILE_IDS = ['design', 'higgsfield-image', 'higgsfield-video', 'midjourney']
+const QC_PROFILE_IDS = ['design', 'higgsfield-image', 'imggen2-image', 'higgsfield-video', 'imggen2-video', 'midjourney']
 const JOB_STATES = [
   'DRAFT', 'READY', 'SUBMITTED', 'GENERATING', 'GRID_READY', 'QC_RUNNING',
   'SELECTED', 'UPSCALING', 'DOWNLOADED', 'ATTACHED', 'FAILED', 'CANCELLED'
@@ -342,6 +369,20 @@ function restoredProviderEvidence(value) {
     return {
       source: 'midjourney', jobId, operationId: boundedMetadataString(value.operationId, 128),
       resultUrl: sanitizeUrl(value.resultUrl)
+    }
+  }
+  if (value.source === 'imggen2-native') {
+    const mediaType = ['image', 'video'].includes(value.mediaType) ? value.mediaType : ''
+    const artifactId = boundedMetadataString(value.artifactId, 128) || boundedMetadataString(value.jobId, 128)
+    const provider = boundedMetadataString(value.provider, 128)
+    const model = boundedMetadataString(value.model, 128)
+    if (!mediaType || !artifactId || !provider || !model) return null
+    return {
+      source: 'imggen2-native', jobId: artifactId, provider, status: 'materialized', model, mediaType,
+      prompt: boundedMetadataString(value.promptDigest, 128) || boundedMetadataString(value.prompt, 128),
+      resultUrl: sanitizeUrl(value.resultUrl),
+      referenceCount: Number.isInteger(value.referenceCount) && value.referenceCount >= 0 ? Math.min(value.referenceCount, 20) : 0,
+      checkedAt: boundedMetadataString(value.checkedAt, 64)
     }
   }
   if (!['higgsfield-mcp', 'higgsfield-web'].includes(value.source)) return null
@@ -884,6 +925,8 @@ function providerForProfile(profileId) {
 function qcProfileFor(input = {}) {
   const src = String(input.src || '')
   const toolName = String(input.toolName || '').toLowerCase()
+  const evidence = restoredProviderEvidence(input.providerEvidence)
+  if (evidence?.source === 'imggen2-native') return evidence.mediaType === 'video' ? 'imggen2-video' : 'imggen2-image'
   let hostname = ''
   try { hostname = new URL(src).hostname.toLowerCase() } catch {}
   if (hostname === 'midjourney.com' || hostname.endsWith('.midjourney.com')) return 'midjourney'
@@ -959,7 +1002,7 @@ function validateAgentCommand(value) {
   if (needsPanel ? !AGENT_PANEL_IDS.includes(value.panelId) : Object.hasOwn(value, 'panelId')) return agentCommandError(needsPanel ? 'panelId must be result or reference' : 'panelId is not allowed for this op')
   const payload = value.payload
   if (value.op === 'status' && hasOnlyKeys(payload, [])) return { ok: true, command: value }
-  if (value.op === 'set-target' && hasOnlyKeys(payload, ['url', 'preset', 'width', 'height']) && validAgentString(payload.url, 4096) && /^(https?|file|data):/i.test(payload.url) && (!Object.hasOwn(payload, 'preset') || validAgentString(payload.preset, 64)) && (!Object.hasOwn(payload, 'width') || Number.isInteger(payload.width) && payload.width >= 240) && (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240)) return { ok: true, command: value }
+  if (value.op === 'set-target' && hasOnlyKeys(payload, ['url', 'preset', 'width', 'height', 'providerEvidence']) && validAgentString(payload.url, 4096) && /^(https?|file|data):/i.test(payload.url) && (!Object.hasOwn(payload, 'preset') || validAgentString(payload.preset, 64)) && (!Object.hasOwn(payload, 'width') || Number.isInteger(payload.width) && payload.width >= 240) && (!Object.hasOwn(payload, 'height') || Number.isInteger(payload.height) && payload.height >= 240) && (!Object.hasOwn(payload, 'providerEvidence') || restoredProviderEvidence(payload.providerEvidence)?.source === 'imggen2-native')) return { ok: true, command: value }
   if (value.op === 'link' && hasOnlyKeys(payload, ['profileId']) && (!Object.hasOwn(payload, 'profileId') || QC_PROFILE_IDS.includes(payload.profileId))) return { ok: true, command: value }
   if (['capture', 'inspect', 'page-checks', 'midjourney-probe'].includes(value.op) && hasOnlyKeys(payload, [])) return { ok: true, command: value }
   if (value.op === 'midjourney-control' && validateMidjourneyControlPayload(payload)) return { ok: true, command: value }
@@ -1053,6 +1096,33 @@ function setBrowserPanel(panelId, patch, options = {}) {
 function subscribe(listener) {
   listeners.add(listener)
   return () => listeners.delete(listener)
+}
+
+const relayedSelectionRequestIds = new Set()
+function rememberRelayedSelection(requestId) {
+  relayedSelectionRequestIds.add(requestId)
+  while (relayedSelectionRequestIds.size > 64) relayedSelectionRequestIds.delete(relayedSelectionRequestIds.values().next().value)
+}
+async function relayPendingSelection(ctx) {
+  let request
+  try { request = await ctx.rest('/selection-request') } catch { return }
+  if (!isRecord(request) || request.version !== 1 || !validAgentString(request.request_id, 64) || request.request_id === '' ||
+      !CANDIDATE_IDS.includes(request.candidate_id) || !Number.isInteger(request.revision) ||
+      typeof request.run_id !== 'string' || request.run_id === '' || typeof request.scope !== 'string' || request.scope === '') return
+  if (relayedSelectionRequestIds.has(request.request_id)) return
+  const ack = async body => {
+    try {
+      await ctx.rest('/selection-ack', { method: 'POST', body: { version: 1, request_id: request.request_id, ...body } })
+      rememberRelayedSelection(request.request_id)
+    } catch {}
+  }
+  const context = state.reviewContext
+  const candidate = state.candidates[request.candidate_id]
+  const valid = reviewContextMatches(state, state.qcProfile) && candidateHasReview(candidate)
+  if (!valid || state.job?.id !== request.run_id) return void await ack({ ok: false, error: 'Desktop review context is absent or stale' })
+  if (state.job.state !== 'QC_RUNNING' && state.job.state !== 'GRID_READY') return void await ack({ ok: false, error: 'Desktop review is not selectable' })
+  setState({ selectedCandidate: request.candidate_id })
+  await ack({ ok: true, candidate_id: request.candidate_id, contextId: context.contextId, revision: request.revision })
 }
 
 function useWorkbench() {
@@ -1868,7 +1938,7 @@ function linkBrowserPanelToQc(panelId, input = {}) {
   }
   const profileId = QC_PROFILE_IDS.includes(input.profileId)
     ? input.profileId
-    : QC_PROFILE_IDS.includes(panel.qcProfileHint) ? panel.qcProfileHint : qcProfileFor({ ...input, src: panel.url })
+    : QC_PROFILE_IDS.includes(panel.qcProfileHint) ? panel.qcProfileHint : qcProfileFor({ ...input, src: panel.url, providerEvidence: panel.providerEvidence })
   setState(linkPanelState(state, panelId, { ...input, profileId }, createId))
   host.panes?.setOpen?.(BROWSER_PANE_ID, true)
   host.panes?.setOpen?.(QC_PANE_ID, true)
@@ -3045,6 +3115,8 @@ export default {
     ctx.storage.set('workbench.v7', persistedState())
     const seenAgentCommandIds = new Set()
     ctx.socket('/commands', received => { void dispatchAgentCommand(ctx, received, seenAgentCommandIds) })
+    const relayTimer = setInterval(() => { void relayPendingSelection(ctx) }, 1500)
+    ctx.onDispose?.(() => clearInterval(relayTimer))
 
     ctx.registerMany([
       {

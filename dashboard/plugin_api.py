@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import stat
+import time
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -40,6 +41,42 @@ _BILLABLE_ACTIONS = {"upscale", "vary", "reroll", "pan", "zoom"}
 _BILLABLE_LEDGER_FILE = "midjourney-billable-ledger.json"
 _BILLABLE_LEDGER_LOCK_FILE = ".midjourney-billable-ledger.lock"
 _BILLABLE_LEDGER_LIMIT = 256
+_SELECTION_MAX_AGE = 120
+
+
+def _relay_file(name: str) -> Path:
+    return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser().resolve() / "plugins" / "renderline-telegram" / name
+
+
+def _read_selection_request() -> dict[str, Any] | None:
+    path = _relay_file("selection-request.json")
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 4096:
+            return None
+        with path.open(encoding="utf-8") as source:
+            value = json.load(source)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(value, dict) or value.get("version") != 1 or value.get("candidate_id") not in {"A", "B", "C", "D"}:
+        return None
+    for field in ("request_id", "run_id", "scope"):
+        if not isinstance(value.get(field), str) or not value[field] or len(value[field]) > 128:
+            return None
+    if not isinstance(value.get("revision"), int) or isinstance(value["revision"], bool) or not isinstance(value.get("created_at"), (int, float)):
+        return None
+    if time.time() - value["created_at"] > _SELECTION_MAX_AGE:
+        return None
+    return value
+
+
+def _write_selection_ack(value: dict[str, Any]) -> None:
+    path = _relay_file("selection-ack.json")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    temporary.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
 
 
 class _BillableLedgerError(Exception):
@@ -475,7 +512,7 @@ def _validate_command(command: dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="Command op is not supported")
     if command.get("op") == "set-target":
         payload = command.get("payload")
-        if not isinstance(payload, dict) or not set(payload).issubset({"url", "preset", "width", "height"}) or "url" not in payload:
+        if not isinstance(payload, dict) or not set(payload).issubset({"url", "preset", "width", "height", "providerEvidence"}) or "url" not in payload:
             raise HTTPException(status_code=400, detail="Set-target command must use the typed target contract")
         if not isinstance(payload["url"], str) or not payload["url"]:
             raise HTTPException(status_code=400, detail="Set-target URL must be a non-empty string")
@@ -484,6 +521,18 @@ def _validate_command(command: dict[str, Any]) -> None:
         for dimension in ("width", "height"):
             if dimension in payload and (not isinstance(payload[dimension], int) or isinstance(payload[dimension], bool) or payload[dimension] < 240):
                 raise HTTPException(status_code=400, detail=f"Set-target {dimension} must be an integer of at least 240")
+        if "providerEvidence" in payload:
+            evidence = payload["providerEvidence"]
+            allowed = {"source", "artifactId", "provider", "model", "mediaType", "promptDigest", "resultUrl", "referenceCount", "checkedAt"}
+            if not isinstance(evidence, dict) or set(evidence) - allowed or evidence.get("source") != "imggen2-native":
+                raise HTTPException(status_code=400, detail="Set-target provider evidence must use the ImgGen2 native contract")
+            for field in ("artifactId", "provider", "model", "mediaType"):
+                if not isinstance(evidence.get(field), str) or not evidence[field] or len(evidence[field]) > 128:
+                    raise HTTPException(status_code=400, detail=f"Set-target provider evidence {field} must be a bounded string")
+            if evidence["mediaType"] not in {"image", "video"}:
+                raise HTTPException(status_code=400, detail="Set-target provider evidence mediaType must be image or video")
+            if "referenceCount" in evidence and (not isinstance(evidence["referenceCount"], int) or isinstance(evidence["referenceCount"], bool) or not 0 <= evidence["referenceCount"] <= 20):
+                raise HTTPException(status_code=400, detail="Set-target provider evidence referenceCount must be an integer from 0 to 20")
     if not _valid_higgsfield_command(command):
         raise HTTPException(status_code=400, detail="Higgsfield command must use the typed lifecycle contract")
 
@@ -616,3 +665,29 @@ async def get_state():
     if _LATEST_STATE is None:
         return JSONResponse(status_code=404, content={"reported": False})
     return _sanitize_sensitive_urls(_LATEST_STATE)
+
+
+@router.get("/selection-request")
+async def get_selection_request():
+    request = _read_selection_request()
+    if request is None:
+        return JSONResponse(status_code=404, content={"pending": False})
+    return request
+
+
+@router.post("/selection-ack")
+async def post_selection_ack(request: Request):
+    body = await _json_body(request)
+    if set(body) - {"version", "request_id", "ok", "error", "candidate_id", "contextId", "revision"}:
+        raise HTTPException(status_code=400, detail="Invalid selection acknowledgement")
+    if body.get("version") != 1 or not isinstance(body.get("request_id"), str) or not body["request_id"] or len(body["request_id"]) > 128 or not isinstance(body.get("ok"), bool):
+        raise HTTPException(status_code=400, detail="Invalid selection acknowledgement")
+    if "candidate_id" in body and body["candidate_id"] not in {"A", "B", "C", "D"}:
+        raise HTTPException(status_code=400, detail="Invalid selection acknowledgement")
+    if "revision" in body and (not isinstance(body["revision"], int) or isinstance(body["revision"], bool)):
+        raise HTTPException(status_code=400, detail="Invalid selection acknowledgement")
+    for field in ("error", "contextId"):
+        if field in body and (not isinstance(body[field], str) or len(body[field]) > 512):
+            raise HTTPException(status_code=400, detail="Invalid selection acknowledgement")
+    _write_selection_ack(body)
+    return {"stored": True, "request_id": body["request_id"]}

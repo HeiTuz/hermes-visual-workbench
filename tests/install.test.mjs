@@ -26,24 +26,24 @@ function run(args, env = {}) {
 }
 
 async function workspace() {
-  return mkdtemp(join(tmpdir(), 'hermes-visual-workbench-'))
+  return mkdtemp(join(tmpdir(), 'renderline-'))
 }
 
 test('installs, updates with backup, and uninstalls managed plugin, skill, and dashboard files', async t => {
   const target = await workspace()
-  const dashboardTarget = join(target, 'plugins', 'visual-workbench', 'dashboard')
+  const dashboardTarget = join(target, 'plugins', 'renderline', 'dashboard')
   t.after(() => rm(target, { force: true, recursive: true }))
 
   const installed = run(['--target', target])
   assert.equal(installed.status, 0, installed.stderr)
-  assert.match(installed.stdout, /Run: hermes plugins enable visual-workbench \(backend restart required\)/)
+  assert.match(installed.stdout, /Run: hermes plugins enable renderline \(backend restart required\)/)
   assert.equal(await readFile(join(target, 'plugin.js'), 'utf8'), sourcePlugin)
   assert.equal(await readFile(join(target, 'skill', 'SKILL.md'), 'utf8'), sourceSkill)
-  assert.equal(await readFile(join(target, 'plugins', 'visual-workbench', 'plugin.yaml'), 'utf8'), sourceBackendManifest)
-  assert.equal(await readFile(join(target, 'plugins', 'visual-workbench', '__init__.py'), 'utf8'), sourceBackendInit)
+  assert.equal(await readFile(join(target, 'plugins', 'renderline', 'plugin.yaml'), 'utf8'), sourceBackendManifest)
+  assert.equal(await readFile(join(target, 'plugins', 'renderline', '__init__.py'), 'utf8'), sourceBackendInit)
   assert.equal(await readFile(join(dashboardTarget, 'manifest.json'), 'utf8'), sourceDashboardManifest)
   assert.equal(await readFile(join(dashboardTarget, 'plugin_api.py'), 'utf8'), sourceDashboardApi)
-  const marker = JSON.parse(await readFile(join(target, '.hermes-visual-workbench-install.json'), 'utf8'))
+  const marker = JSON.parse(await readFile(join(target, '.renderline-install.json'), 'utf8'))
   assert.deepEqual(marker.files.map(file => file.id), [
     'plugin',
     'skill',
@@ -72,8 +72,8 @@ test('installs, updates with backup, and uninstalls managed plugin, skill, and d
   assert.equal(removed.status, 0, removed.stderr)
   await assert.rejects(readFile(join(target, 'plugin.js')), /ENOENT/)
   await assert.rejects(readFile(join(target, 'skill', 'SKILL.md')), /ENOENT/)
-  await assert.rejects(readFile(join(target, 'plugins', 'visual-workbench', 'plugin.yaml')), /ENOENT/)
-  await assert.rejects(readFile(join(target, 'plugins', 'visual-workbench', '__init__.py')), /ENOENT/)
+  await assert.rejects(readFile(join(target, 'plugins', 'renderline', 'plugin.yaml')), /ENOENT/)
+  await assert.rejects(readFile(join(target, 'plugins', 'renderline', '__init__.py')), /ENOENT/)
   await assert.rejects(readFile(join(dashboardTarget, 'manifest.json')), /ENOENT/)
   await assert.rejects(readFile(join(dashboardTarget, 'plugin_api.py')), /ENOENT/)
 })
@@ -110,10 +110,10 @@ test('rolls back every managed file from its newest backup', async t => {
   assert.equal(run(['--target', target]).status, 0)
   const prior = [
     ['plugin.js', '// prior plugin\n'], ['skill/SKILL.md', '# prior skill\n'],
-    ['plugins/visual-workbench/plugin.yaml', 'prior manifest\n'],
-    ['plugins/visual-workbench/__init__.py', '# prior backend\n'],
-    ['plugins/visual-workbench/dashboard/manifest.json', '{}\n'],
-    ['plugins/visual-workbench/dashboard/plugin_api.py', '# prior api\n']
+    ['plugins/renderline/plugin.yaml', 'prior manifest\n'],
+    ['plugins/renderline/__init__.py', '# prior backend\n'],
+    ['plugins/renderline/dashboard/manifest.json', '{}\n'],
+    ['plugins/renderline/dashboard/plugin_api.py', '# prior api\n']
   ]
   for (const [relative, value] of prior) await writeFile(join(target, relative), value)
   assert.equal(run(['--target', target, '--update']).status, 0)
@@ -132,7 +132,7 @@ test('rollback restores one coherent partial-update transaction', async t => {
   t.after(() => rm(target, { force: true, recursive: true }))
   assert.equal(run(['--target', target]).status, 0)
   const skillBefore = await readFile(join(target, 'skill', 'SKILL.md'), 'utf8')
-  const markerBefore = await readFile(join(target, '.hermes-visual-workbench-install.json'), 'utf8')
+  const markerBefore = await readFile(join(target, '.renderline-install.json'), 'utf8')
 
   await writeFile(join(target, 'plugin.js'), '// prior partial plugin\n')
   assert.equal(run(['--target', target, '--update']).status, 0)
@@ -144,7 +144,7 @@ test('rollback restores one coherent partial-update transaction', async t => {
   assert.equal(run(['--target', target, '--rollback']).status, 0)
   assert.equal(await readFile(join(target, 'plugin.js'), 'utf8'), '// prior partial plugin\n')
   assert.equal(await readFile(join(target, 'skill', 'SKILL.md'), 'utf8'), skillBefore)
-  assert.equal(await readFile(join(target, '.hermes-visual-workbench-install.json'), 'utf8'), markerBefore)
+  assert.equal(await readFile(join(target, '.renderline-install.json'), 'utf8'), markerBefore)
 })
 
 test('requires custom plugin and skill targets to be supplied together', async t => {
@@ -190,7 +190,7 @@ test('refuses to uninstall a modified workflow skill unless forced', async t => 
 test('never trusts marker paths as uninstall deletion targets', async t => {
   const target = await workspace()
   const sentinel = join(target, 'must-survive.txt')
-  const markerPath = join(target, '.hermes-visual-workbench-install.json')
+  const markerPath = join(target, '.renderline-install.json')
   t.after(() => rm(target, { force: true, recursive: true }))
 
   assert.equal(run(['--target', target]).status, 0)
@@ -211,7 +211,7 @@ test('never trusts marker paths as uninstall deletion targets', async t => {
 
 test('forced uninstall removes both fixed targets even with a legacy plugin-only marker', async t => {
   const target = await workspace()
-  const markerPath = join(target, '.hermes-visual-workbench-install.json')
+  const markerPath = join(target, '.renderline-install.json')
   t.after(() => rm(target, { force: true, recursive: true }))
 
   assert.equal(run(['--target', target]).status, 0)
@@ -265,14 +265,14 @@ test('rejects a nonexistent Hermes home below a symlinked profile parent', async
   const result = spawnSync(process.execPath, [installer, '--hermes-home', home], { cwd: root, encoding: 'utf8' })
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /symlink/)
-  await assert.rejects(readFile(join(outside, '.hermes', 'desktop-plugins', 'visual-workbench', 'plugin.js')), /ENOENT/)
+  await assert.rejects(readFile(join(outside, '.hermes', 'desktop-plugins', 'renderline', 'plugin.js')), /ENOENT/)
 })
 
 test('rolls back an earlier managed write when a later write fails', async t => {
   const target = await workspace()
   const skillTarget = join(target, 'skill')
   const pluginPath = join(target, 'plugin.js')
-  const markerPath = join(target, '.hermes-visual-workbench-install.json')
+  const markerPath = join(target, '.renderline-install.json')
   t.after(async () => {
     await chmod(skillTarget, 0o700).catch(() => {})
     await rm(target, { force: true, recursive: true })
@@ -294,12 +294,12 @@ test('is mutation-idempotent when managed bytes and marker are current', async t
   const target = await workspace()
   t.after(() => rm(target, { force: true, recursive: true }))
   assert.equal(run(['--target', target]).status, 0)
-  const markerPath = join(target, '.hermes-visual-workbench-install.json')
+  const markerPath = join(target, '.renderline-install.json')
   const markerBefore = await readFile(markerPath)
   const pluginBefore = await readFile(join(target, 'plugin.js'))
   const repeated = run(['--target', target])
   assert.equal(repeated.status, 0, repeated.stderr)
-  assert.match(repeated.stdout, /Verified Visual Workbench/)
+  assert.match(repeated.stdout, /Verified Renderline/)
   assert.deepEqual(await readFile(markerPath), markerBefore)
   assert.deepEqual(await readFile(join(target, 'plugin.js')), pluginBefore)
   await assert.rejects(readdir(join(target, 'backups')), /ENOENT/)
@@ -327,9 +327,9 @@ test('pins Midjourney automation to the Hermes internal Browser pane', () => {
 })
 
 test('keeps desktop acknowledgements on session auth and local polling on token auth', () => {
-  assert.match(sourceBackendInit, /\/api\/plugins\/visual-workbench\/command/)
-  assert.match(sourceBackendInit, /\/api\/plugins\/visual-workbench\/control\/result/)
-  assert.doesNotMatch(sourceBackendInit, /["']\/api\/plugins\/visual-workbench\/result["']/)
+  assert.match(sourceBackendInit, /\/api\/plugins\/renderline\/command/)
+  assert.match(sourceBackendInit, /\/api\/plugins\/renderline\/control\/result/)
+  assert.doesNotMatch(sourceBackendInit, /["']\/api\/plugins\/renderline\/result["']/)
   assert.match(sourceDashboardApi, /@router\.post\("\/result"\)/)
   assert.match(sourceDashboardApi, /@router\.get\("\/control\/result"\)/)
   assert.match(sourceDashboardApi, /"operationId": reservation\["operationId"\]/)
@@ -341,7 +341,7 @@ test('keeps desktop acknowledgements on session auth and local polling on token 
 })
 test('durably reserves billable Midjourney commands before the command broadcast', () => {
   assert.match(sourceDashboardApi, /_BILLABLE_LEDGER_LOCK = asyncio\.Lock\(\)/)
-  assert.match(sourceDashboardApi, /home\.expanduser\(\)\.resolve\(strict=False\) \/ "plugins" \/ "visual-workbench"/)
+  assert.match(sourceDashboardApi, /home\.expanduser\(\)\.resolve\(strict=False\) \/ "plugins" \/ "renderline"/)
   assert.match(sourceDashboardApi, /"idempotencyKeyHash"/)
   assert.match(sourceDashboardApi, /"requestFingerprint"/)
   assert.match(sourceDashboardApi, /"targetFingerprint"/)

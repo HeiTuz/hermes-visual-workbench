@@ -1,6 +1,6 @@
-"""Agent command bridge for the Visual Workbench desktop plugin.
+"""Agent command bridge for the Renderline desktop plugin.
 
-Routes are mounted below ``/api/plugins/visual-workbench`` by Hermes.
+Routes are mounted below ``/api/plugins/renderline`` by Hermes.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def _canonical_plugin_dir() -> Path:
         home = Path(get_hermes_home())
     except Exception:
         home = Path(os.environ.get("HERMES_HOME", "~/.hermes"))
-    return home.expanduser().resolve(strict=False) / "plugins" / "visual-workbench"
+    return home.expanduser().resolve(strict=False) / "plugins" / "renderline"
 
 
 def _safe_ledger_file(plugin_dir: Path) -> Path:

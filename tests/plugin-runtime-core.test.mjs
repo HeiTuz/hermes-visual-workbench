@@ -568,7 +568,7 @@ test('Midjourney control surface uses the typed Hermes seam and excludes forbidd
   assert.match(midjourneyCliSource, /operationId: queued\.operationId/)
   assert.match(midjourneyCliSource, /openapi\.json/)
   assert.match(midjourneyCliSource, /body\?\.info\?\.title !== 'Hermes Agent'/)
-  assert.match(midjourneyCliSource, /visual-workbench\/control\/result\?cursor=0/)
+  assert.match(midjourneyCliSource, /renderline\/control\/result\?cursor=0/)
   assert.match(midjourneyCliSource, /if \(authorized\.ok\) return/)
   assert.match(midjourneyCliSource, /control token must have mode 0600/)
   assert.doesNotMatch(midjourneyCliSource, /console\.(?:log|error)\([^\n]*token/)

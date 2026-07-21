@@ -1,6 +1,6 @@
 {
-  "id": "visual-workbench",
-  "name": "Visual Workbench",
+  "id": "renderline",
+  "name": "Renderline",
   "version": "0.7.0",
   "entry": "plugin.js",
   "fullHostCapabilities": [

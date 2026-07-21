@@ -1,7 +1,7 @@
 # Midjourney Web Bridge API
 
 **Status:** live local control surface — selector registry `mj-web-2026-07-19.v3`  
-**Owner:** user-local `hermes-visual-workbench`; no upstream Hermes PR/release is implied.
+**Owner:** user-local `renderline`; no upstream Hermes PR/release is implied.
 
 ## Decision
 
@@ -23,7 +23,7 @@ Billable activation remains fail-closed. Three approved Creative Upscale attempt
 
 ## API surface
 
-The transport endpoint is `POST /api/plugins/visual-workbench/command` with `op: "midjourney-control"`, `panelId: "result"`, and an action-specific payload. Results are read from `GET /api/plugins/visual-workbench/control/result?cursor=N`. Callers should use the CLI rather than handling the token.
+The transport endpoint is `POST /api/plugins/renderline/command` with `op: "midjourney-control"`, `panelId: "result"`, and an action-specific payload. Results are read from `GET /api/plugins/renderline/control/result?cursor=N`. Callers should use the CLI rather than handling the token.
 
 ### CLI commands
 
@@ -101,11 +101,11 @@ The original submit is acknowledged under operation hash `b20d14d835b346f3ce907f
 The installer creates timestamped backups before replacing managed files. To roll back the Desktop plugin:
 
 ```bash
-cp ~/.hermes/desktop-plugins/visual-workbench/backups/plugin/plugin.js-<timestamp>.bak \
-  ~/.hermes/desktop-plugins/visual-workbench/plugin.js
+cp ~/.hermes/desktop-plugins/renderline/backups/plugin/plugin.js-<timestamp>.bak \
+  ~/.hermes/desktop-plugins/renderline/plugin.js
 ```
 
-Then run **Reload desktop plugins** from the Hermes command palette. Backend rollbacks use the corresponding files under `~/.hermes/plugins/visual-workbench/backups/`, followed by a Hermes Agent backend restart. Do not delete `control.token`; rollback preserves the existing local credential and its `0600` mode.
+Then run **Reload desktop plugins** from the Hermes command palette. Backend rollbacks use the corresponding files under `~/.hermes/plugins/renderline/backups/`, followed by a Hermes Agent backend restart. Do not delete `control.token`; rollback preserves the existing local credential and its `0600` mode.
 
 ## Acceptance evidence
 

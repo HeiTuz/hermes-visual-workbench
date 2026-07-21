@@ -1,5 +1,5 @@
 ---
-name: midjourney-visual-workbench
+name: renderline
 description: Prepare, capture, QC, select, and optionally upscale Midjourney results in Hermes Desktop without touching cookies or spending credits without current-turn approval.
 version: 0.7.0
 platforms: [macos]
@@ -9,9 +9,9 @@ metadata:
     category: creative
 ---
 
-# Midjourney Visual Workbench
+# Midjourney Renderline
 
-Use this skill when the user asks to prepare or run a Midjourney job, compare a four-image grid, perform A/B/C/D QC, or import QC into the Visual Workbench pane.
+Use this skill when the user asks to prepare or run a Midjourney job, compare a four-image grid, perform A/B/C/D QC, or import QC into the Renderline pane.
 
 ## Hard boundaries
 
@@ -45,7 +45,7 @@ Any nonterminal state may terminate as `FAILED` or `CANCELLED`. Do not skip live
 8. Analyze the visible four-cell grid with Hermes vision. Label candidates in reading order: A top-left, B top-right, C bottom-left, D bottom-right.
 9. Score all eight dimensions from 0–100: prompt fidelity, composition, identity/reference fidelity, anatomy/geometry, artifacts, typography, color/material fidelity, production readiness.
 10. Assign each candidate exactly one disposition: `PASS`, `REPAIR`, or `REJECT`. Record concise evidence and a repair prompt when repairable.
-11. Produce strict QC JSON matching Visual Workbench schema version 1. In the already-linked Quality Control pane, confirm **Midjourney QC**, paste into **Import QC JSON**, and press **Import QC JSON**. Confirm the target card, capture evidence, four candidates, and selected recommendation render together.
+11. Produce strict QC JSON matching Renderline schema version 1. In the already-linked Quality Control pane, confirm **Midjourney QC**, paste into **Import QC JSON**, and press **Import QC JSON**. Confirm the target card, capture evidence, four candidates, and selected recommendation render together.
 12. Recommend one candidate. Upscale or vary only with fresh explicit approval. Download/attach only the chosen result and record visible result references plus local paths.
 
 ## Strict QC document
@@ -68,7 +68,7 @@ Use the dashboard session token; do not embed or log it. From a shell inside the
 TOKEN="$HERMES_DASHBOARD_SESSION_TOKEN"   # injected into the backend env by Hermes Desktop
 BPID=$(for p in $(pgrep -f 'hermes_cli.main serve'); do ps eww $p | grep -q "$TOKEN" && echo $p && break; done)
 PORT=$(lsof -nP -a -p "$BPID" -iTCP -sTCP:LISTEN | awk 'NR==2{sub(".*:","",$9); print $9}')
-BASE="http://127.0.0.1:$PORT/api/plugins/visual-workbench"
+BASE="http://127.0.0.1:$PORT/api/plugins/renderline"
 curl -sS -X POST "$BASE/command" \
   -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   --data '{"id":"qc-1","op":"status","payload":{}}'

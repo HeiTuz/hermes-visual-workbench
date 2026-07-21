@@ -17,15 +17,15 @@ import {
   targetDirectory
 } from './lib.mjs'
 
-const usage = `Hermes Visual Workbench installer
+const usage = `Hermes Renderline installer
 
 Usage:
-  hermes-visual-workbench [--hermes-home PATH]
-  hermes-visual-workbench --target PLUGIN_DIRECTORY --skill-target SKILL_DIRECTORY
-  hermes-visual-workbench --install|--update [--dry-run]
-  hermes-visual-workbench --verify
-  hermes-visual-workbench --rollback [--dry-run]
-  hermes-visual-workbench --uninstall [--force]
+  renderline [--hermes-home PATH]
+  renderline --target PLUGIN_DIRECTORY --skill-target SKILL_DIRECTORY
+  renderline --install|--update [--dry-run]
+  renderline --verify
+  renderline --rollback [--dry-run]
+  renderline --uninstall [--force]
 
 Options:
   --hermes-home PATH  Hermes home (default: HERMES_HOME or ~/.hermes)
@@ -48,6 +48,26 @@ async function exists(path) {
   } catch {
     return false
   }
+}
+
+async function migrateLegacyDirectory(from, to, label) {
+  if (!(await exists(from))) return false
+  if (await exists(to)) throw new Error(`Legacy ${label} exists at ${from}, but ${to} already exists; reconcile explicitly rather than overwrite.`)
+  await mkdir(dirname(to), { recursive: true })
+  await rename(from, to)
+  return true
+}
+
+async function migrateLegacyInstallPaths(hermesHome, target, skillTarget, dashboardTarget, options) {
+  if (options.target || options.skillTarget) return []
+  const legacy = [
+    [join(hermesHome, 'desktop-plugins', 'visual-workbench'), target, 'Renderline plugin'],
+    [join(hermesHome, 'skills', 'midjourney-visual-workbench'), skillTarget, 'Renderline skill'],
+    [join(hermesHome, 'plugins', 'visual-workbench'), dirname(dashboardTarget), 'Renderline backend']
+  ]
+  const moved = []
+  for (const [from, to, label] of legacy) if (await migrateLegacyDirectory(from, to, label)) moved.push({ from, to })
+  return moved
 }
 
 async function readManagedFile(path) {
@@ -97,7 +117,7 @@ async function uninstall(target, skillTarget, dashboardTarget, options) {
   const expected = expectedManagedFiles(target, skillTarget, dashboardTarget)
 
   if (!(await Promise.all([...expected.map(file => exists(file.path)), exists(markerPath)])).some(Boolean)) {
-    console.log(`Visual Workbench is not installed at ${target}`)
+    console.log(`Renderline is not installed at ${target}`)
     return
   }
 
@@ -132,7 +152,7 @@ async function uninstall(target, skillTarget, dashboardTarget, options) {
   for (const file of files) await rm(file.path, { force: true })
   await rm(markerPath, { force: true })
   await rm(skillTarget, { force: true, recursive: false }).catch(() => {})
-  console.log(`Removed Visual Workbench from ${target}`)
+  console.log(`Removed Renderline from ${target}`)
 }
 
 async function install(target, skillTarget, dashboardTarget, dryRun = false) {
@@ -220,9 +240,9 @@ async function install(target, skillTarget, dashboardTarget, dryRun = false) {
   for (const operation of operations.filter(operation => operation.type === 'backup')) {
     console.log(`Backed up existing ${operation.path === markerPath ? 'marker' : plans.find(file => file.path === operation.path)?.id} to ${operation.backup}`)
   }
-  console.log(`${plans.some(file => file.changed) ? 'Installed' : 'Verified'} Visual Workbench ${packageJson.version} at ${target}`)
+  console.log(`${plans.some(file => file.changed) ? 'Installed' : 'Verified'} Renderline ${packageJson.version} at ${target}`)
   console.log(`Installed Midjourney workflow skill to ${skillTarget}`)
-  console.log('Run: hermes plugins enable visual-workbench (backend restart required)')
+  console.log('Run: hermes plugins enable renderline (backend restart required)')
 }
 
 async function verify(target, skillTarget, dashboardTarget) {
@@ -243,10 +263,10 @@ async function verify(target, skillTarget, dashboardTarget) {
     const sourceHash = sha256(source)
     const markedHash = marked.find(entry => entry.id === file.id)?.sha256
     if (!current || sha256(current) !== sourceHash || markedHash !== sourceHash) {
-      throw new Error(`Compatibility error: managed file differs from source: ${file.id}. Run hermes-visual-workbench --update`)
+      throw new Error(`Compatibility error: managed file differs from source: ${file.id}. Run renderline --update`)
     }
   }
-  console.log(`Verified Visual Workbench ${marker.version || 'unknown'} at ${target}`)
+  console.log(`Verified Renderline ${marker.version || 'unknown'} at ${target}`)
 }
 
 async function rollback(target, skillTarget, dashboardTarget, dryRun = false) {
@@ -334,7 +354,7 @@ async function rollback(target, skillTarget, dashboardTarget, dryRun = false) {
     else await rm(markerPath, { force: true })
     throw error
   }
-  console.log(`Rolled back Visual Workbench at ${target}`)
+  console.log(`Rolled back Renderline at ${target}`)
 }
 
 try {
@@ -346,6 +366,8 @@ try {
     const skillTarget = skillDirectory(options)
     const dashboardTarget = dashboardDirectory(options)
     const hermesHome = hermesHomeDirectory(options)
+    const migratedLegacyPaths = await migrateLegacyInstallPaths(hermesHome, target, skillTarget, dashboardTarget, options)
+    if (migratedLegacyPaths.length) console.log(`Migrated ${migratedLegacyPaths.length} legacy Renderline path(s)`)
     const destinations = [
       target, skillTarget, dashboardTarget,
       join(target, MARKER_NAME), join(target, 'backups'),
@@ -358,6 +380,6 @@ try {
     else await install(target, skillTarget, dashboardTarget, options.dryRun)
   }
 } catch (error) {
-  console.error(`hermes-visual-workbench: ${error instanceof Error ? error.message : String(error)}`)
+  console.error(`renderline: ${error instanceof Error ? error.message : String(error)}`)
   process.exitCode = 1
 }

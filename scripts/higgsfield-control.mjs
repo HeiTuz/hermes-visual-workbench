@@ -32,7 +32,7 @@ const HIGGSFIELD_BIN = process.env.HIGGSFIELD_BIN || 'higgsfield'
 function usage() {
   process.stderr.write(`Usage: higgsfield-control <account|generations|souls|models|job|evidence> [flags]
 
-Read-only Higgsfield CLI bridge for Visual Workbench QC provenance.
+Read-only Higgsfield CLI bridge for Renderline QC provenance.
 
 Commands:
   account            Print signed-in account status (higgsfield account status)
@@ -40,7 +40,7 @@ Commands:
   souls              List Soul references (higgsfield soul-id list)
   models             List available models (higgsfield model list)
   job --job-id ID    Inspect one existing job (higgsfield generate get ID)
-  evidence           Print normalized Visual Workbench provider evidence for one job
+  evidence           Print normalized Renderline provider evidence for one job
 
 Flags:
   --job-id ID        Target job id (job / evidence)
@@ -116,7 +116,7 @@ export function evidenceForJob(job, srcOverride) {
   if (!job || typeof job !== 'object') return null
   const src = typeof srcOverride === 'string' && srcOverride ? srcOverride : jobResultUrls(job)[0]
   if (typeof src !== 'string' || !src) return null
-  // Reuse the exact provenance normalization the Visual Workbench already trusts for
+  // Reuse the exact provenance normalization the Renderline already trusts for
   // Higgsfield results. The synthetic tool name keeps the existing extractor path while
   // the result URL is sanitized (signed query params removed) inside restoredProviderEvidence.
   return providerEvidenceFor({ toolName: 'higgsfield-cli', src, toolResult: { items: [job] } })

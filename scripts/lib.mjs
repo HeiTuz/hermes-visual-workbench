@@ -5,8 +5,8 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
-export const MARKER_NAME = '.hermes-visual-workbench-install.json'
-export const SKILL_NAME = 'midjourney-visual-workbench'
+export const MARKER_NAME = '.renderline-install.json'
+export const SKILL_NAME = 'renderline'
 
 export function parseArgs(argv) {
   const args = [...argv]
@@ -55,7 +55,7 @@ export function parseArgs(argv) {
 export function targetDirectory(options, env = process.env) {
   if (options.target) return resolve(options.target)
   const hermesHome = options.hermesHome || env.HERMES_HOME || join(homedir(), '.hermes')
-  return join(resolve(hermesHome), 'desktop-plugins', 'visual-workbench')
+  return join(resolve(hermesHome), 'desktop-plugins', 'renderline')
 }
 
 export function hermesHomeDirectory(options, env = process.env) {
@@ -67,7 +67,7 @@ export function skillDirectory(options, env = process.env) {
   return join(hermesHomeDirectory(options, env), 'skills', SKILL_NAME)
 }
 export function dashboardDirectory(options, env = process.env) {
-  return join(hermesHomeDirectory(options, env), 'plugins', 'visual-workbench', 'dashboard')
+  return join(hermesHomeDirectory(options, env), 'plugins', 'renderline', 'dashboard')
 }
 
 export function sha256(value) {

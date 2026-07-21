@@ -141,7 +141,7 @@ class BillableLedgerTests(unittest.TestCase):
         second, existing = plugin_api._reserve_billable_command(self.command("submit-2"), "submit", "fixture-key-1234")
         self.assertTrue(existing)
         self.assertEqual(second, first)
-        ledger = Path(self.temp.name) / "plugins" / "visual-workbench" / plugin_api._BILLABLE_LEDGER_FILE
+        ledger = Path(self.temp.name) / "plugins" / "renderline" / plugin_api._BILLABLE_LEDGER_FILE
         self.assertEqual(stat.S_IMODE(ledger.stat().st_mode), 0o600)
 
     def test_same_key_with_changed_request_fails_closed(self) -> None:
@@ -204,7 +204,7 @@ class BillableLedgerTests(unittest.TestCase):
 
 
     def test_v1_ledger_decodes_to_v2_shape(self) -> None:
-        ledger_dir = Path(self.temp.name) / "plugins" / "visual-workbench"
+        ledger_dir = Path(self.temp.name) / "plugins" / "renderline"
         ledger_dir.mkdir(parents=True, exist_ok=True)
         entry = plugin_api._billable_record(self.command("submit-1"), "submit", "fixture-key-1234")
         (ledger_dir / plugin_api._BILLABLE_LEDGER_FILE).write_text(

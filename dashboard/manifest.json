@@ -1,5 +1,5 @@
 {
-  "name": "visual-workbench",
+  "name": "renderline",
   "api": "plugin_api.py",
   "tab": {
     "hidden": true

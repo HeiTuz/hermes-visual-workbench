@@ -1,6 +1,6 @@
-# Visual Workbench vNext — Lane E Verification
+# Renderline vNext — Lane E Verification
 
-Reviewer: worker-5 (Lane E, critic). Baseline: clean `main` @ fef8ee4 (v0.2.1). Reviewed integration: leader head 526afe0 (core registry 02253b7, schema/restore freeze d745f71, descriptor UI routing c7fc49b, pinning docs 526afe0), then finding-resolution commits ae50b09 (F1–F3) and 3123e62 (F4–F5) — final verified head **3123e62, v0.3.0**. Frozen slice: S1 provider-adapter core extraction, minimal cut (no persisted-schema bump) + mandatory internal-browser pinning enforcement (`docs/visual-workbench-vnext-audit.md`, "Frozen slice").
+Reviewer: worker-5 (Lane E, critic). Baseline: clean `main` @ fef8ee4 (v0.2.1). Reviewed integration: leader head 526afe0 (core registry 02253b7, schema/restore freeze d745f71, descriptor UI routing c7fc49b, pinning docs 526afe0), then finding-resolution commits ae50b09 (F1–F3) and 3123e62 (F4–F5) — final verified head **3123e62, v0.3.0**. Frozen slice: S1 provider-adapter core extraction, minimal cut (no persisted-schema bump) + mandatory internal-browser pinning enforcement (`docs/renderline-vnext-audit.md`, "Frozen slice").
 
 ## Before/after matrix
 

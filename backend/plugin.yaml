@@ -1,6 +1,6 @@
 manifest_version: 1
 name: renderline
-version: 0.7.3
+version: 0.7.4
 kind: standalone
 host_version: ">=0.18.2"
 description: "Local Renderline dashboard bridge for browser capture, QC, and bounded Midjourney control."

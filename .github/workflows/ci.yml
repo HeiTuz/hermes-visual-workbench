@@ -27,17 +27,17 @@ jobs:
         shell: bash
         run: |
           tarball=$(npm pack --silent)
-          npx --yes "./$tarball" -- --target "$RUNNER_TEMP/npx-plugin" --skill-target "$RUNNER_TEMP/npx-skill"
-          test -f "$RUNNER_TEMP/npx-plugin/plugin.js"
-          test -f "$RUNNER_TEMP/npx-skill/SKILL.md"
-          test "$(sha256sum plugin.js | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/npx-plugin/plugin.js" | cut -d' ' -f1)"
-          test "$(sha256sum skill/SKILL.md | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/npx-skill/SKILL.md" | cut -d' ' -f1)"
+          npx --yes "./$tarball" -- --hermes-home "$RUNNER_TEMP/npx-hermes"
+          test -f "$RUNNER_TEMP/npx-hermes/desktop-plugins/renderline/plugin.js"
+          test -f "$RUNNER_TEMP/npx-hermes/skills/renderline/SKILL.md"
+          test "$(sha256sum plugin.js | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/npx-hermes/desktop-plugins/renderline/plugin.js" | cut -d' ' -f1)"
+          test "$(sha256sum skill/SKILL.md | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/npx-hermes/skills/renderline/SKILL.md" | cut -d' ' -f1)"
       - name: Smoke Bun runner
         shell: bash
         run: |
           tarball=$(ls renderline-*.tgz | head -1)
-          bunx --package "$GITHUB_WORKSPACE/$tarball" renderline --target "$RUNNER_TEMP/bun-plugin" --skill-target "$RUNNER_TEMP/bun-skill"
-          test -f "$RUNNER_TEMP/bun-plugin/plugin.js"
-          test -f "$RUNNER_TEMP/bun-skill/SKILL.md"
-          test "$(sha256sum plugin.js | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/bun-plugin/plugin.js" | cut -d' ' -f1)"
-          test "$(sha256sum skill/SKILL.md | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/bun-skill/SKILL.md" | cut -d' ' -f1)"
+          bunx --package "$GITHUB_WORKSPACE/$tarball" renderline --hermes-home "$RUNNER_TEMP/bun-hermes"
+          test -f "$RUNNER_TEMP/bun-hermes/desktop-plugins/renderline/plugin.js"
+          test -f "$RUNNER_TEMP/bun-hermes/skills/renderline/SKILL.md"
+          test "$(sha256sum plugin.js | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/bun-hermes/desktop-plugins/renderline/plugin.js" | cut -d' ' -f1)"
+          test "$(sha256sum skill/SKILL.md | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/bun-hermes/skills/renderline/SKILL.md" | cut -d' ' -f1)"

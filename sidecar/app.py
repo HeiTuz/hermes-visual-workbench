@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 router = APIRouter()
-SERVICE_VERSION = "0.8.0"
+SERVICE_VERSION = "0.8.1"
 API_SCHEMA_VERSION = 1
 
 _COMMAND_OPS = {

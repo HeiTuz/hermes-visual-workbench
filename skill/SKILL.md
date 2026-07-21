@@ -1,7 +1,7 @@
 ---
 name: renderline
 description: Generate through Higgsfield and Midjourney, then capture, QC, compare, select, and repair across those results plus materialized ImgGen2 artifacts without touching credentials or spending credits without current-turn approval.
-version: 0.8.0
+version: 0.8.1
 platforms: [macos]
 metadata:
   hermes:

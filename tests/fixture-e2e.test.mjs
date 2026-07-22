@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 
 import { validateQcDocument } from '../scripts/qc-core.mjs'
+import { verifyHandoffReceipt } from '../scripts/handoff-receipt.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const runner = join(root, 'scripts', 'fixture-e2e.mjs')
@@ -20,10 +21,21 @@ test('creates a complete non-billable fixture artifact job under HERMES_HOME', a
   const jobDir = join(hermesHome, 'artifacts', 'midjourney', 'fixture-test')
   assert.equal(output.jobDir, jobDir)
   await stat(join(jobDir, 'capture.svg'))
+  const request = JSON.parse(await readFile(join(jobDir, 'request.json'), 'utf8'))
+  assert.equal(request.creditApproval, false)
   const provenance = JSON.parse(await readFile(join(jobDir, 'provenance.json'), 'utf8'))
   assert.deepEqual(provenance.billableActionsExecuted, [])
   assert.equal(provenance.cookieDataAccessed, false)
   assert.equal(provenance.credentialsEntered, false)
+  const receipt = JSON.parse(await readFile(output.receipt, 'utf8'))
+  assert.equal(receipt.provider, 'midjourney')
+  assert.equal(receipt.assetKind, 'grid')
+  assert.equal(receipt.capture.path, join(jobDir, 'capture.svg'))
+  assert.deepEqual(verifyHandoffReceipt(receipt), {
+    ok: true,
+    state: 'DELIVERABLE',
+    selectedCandidate: 'A'
+  })
   const qc = validateQcDocument(await readFile(join(jobDir, 'qc.json'), 'utf8'))
   assert.equal(qc.selectedCandidate, 'A')
 })

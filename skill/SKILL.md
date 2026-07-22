@@ -26,6 +26,9 @@ There is no automatic cross-lane fallback. A provider change, paid rerun, Midjou
 - Resolve `$HERMES_HOME` first; default to `~/.hermes`. Store run evidence under `$HERMES_HOME/artifacts/renderline/<job-id>/`; preserve the original materialized ImgGen2 artifact in place and record its path/hash rather than moving it.
 - Never read, print, export, delete, move, or migrate Chromium cookies, tokens, Local State, IndexedDB, or credentials. Authentication is verified visually only.
 - Never enter credentials.
+- 3D is unsupported everywhere. Do not select a 3D profile, capture, QC document, receipt, or delivery path; stop with an unsupported-profile result instead.
+- External or unknown provider profiles are local-only intake evidence. They may be inspected and recorded locally, but cannot be submitted, selected for delivery, or used as a provider fallback.
+- Never read a control token or run a command that reads one, including `control.token`. Do not inspect process environments, browser storage, cookies, or credentials.
 - A Midjourney submit, upscale, or variation is credit-consuming. Perform it only when the user's current message explicitly approves that exact action and scope. Old approval, a saved job, or this skill is not approval.
 - Default to `DRAFT → READY` and stop before submit.
 - Browser authority is the Browser pane rendered inside the Hermes Desktop window, backed by `persist:hermes-browser`. Scope every GUI capture and action to `computer_use(..., app="Hermes")` and confirm the target window belongs to Hermes before interacting.
@@ -55,6 +58,7 @@ Any nonterminal state may terminate as `FAILED` or `CANCELLED`. Do not skip live
 10. Assign each candidate exactly one disposition: `PASS`, `REPAIR`, or `REJECT`. Record concise evidence and a repair prompt when repairable.
 11. Produce strict QC JSON matching Renderline schema version 1. In the already-linked Quality Control pane, confirm **Midjourney QC**, paste into **Import QC JSON**, and press **Import QC JSON**. Confirm the target card, capture evidence, four candidates, and selected recommendation render together.
 12. Recommend one candidate. Upscale or vary only with fresh explicit approval. Download/attach only the chosen result and record visible result references plus local paths.
+13. Deliver only with a complete handoff receipt whose selected candidate is present exactly once in the QC candidates and has disposition `PASS`. Do not deliver a `REPAIR`, `REJECT`, missing, ambiguous, or unselected candidate.
 
 ## ImgGen2 artifact intake
 
@@ -76,44 +80,28 @@ Top-level fields are exactly: `schemaVersion`, `job`, `selectedCandidate`, `cand
 - Input over 64 KiB, malformed JSON, unknown fields, missing fields, and invalid ranges must be rejected. Never replace prior good state after an import error.
 ## Agent-driven QC
 
-Use the dashboard session token; do not embed or log it. From a shell inside the Hermes backend (e.g. the desktop-spawned agent), resolve the endpoint and token, submit a v1 command, then poll its result:
-
-```sh
-TOKEN="$HERMES_DASHBOARD_SESSION_TOKEN"   # injected into the backend env by Hermes Desktop
-BPID=$(for p in $(pgrep -f 'hermes_cli.main serve'); do ps eww $p | grep -q "$TOKEN" && echo $p && break; done)
-PORT=$(lsof -nP -a -p "$BPID" -iTCP -sTCP:LISTEN | awk 'NR==2{sub(".*:","",$9); print $9}')
-BASE="http://127.0.0.1:$PORT/api/plugins/renderline"
-curl -sS -X POST "$BASE/command" \
-  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-  --data '{"id":"qc-1","op":"status","payload":{}}'
-curl -sS "$BASE/result/qc-1" -H "Authorization: Bearer $TOKEN"
-```
-
-If `TOKEN` is empty or `POST /command` fails, Hermes Desktop is not running: skip mirroring and continue with tool-based QC only.
-
-Poll `GET /result/<id>` until it returns `200` rather than `{ "pending": true }`. Each acknowledgement contains `ok`, `error`, `summary`, and the current status snapshot.
+Renderline's sidecar is an internal, launchd-managed local service. Do not read its control token, inspect process environments, or invoke token-bearing shell commands. Use only the authenticated Hermes-integrated QC surface.
 
 - Design sequence: `set-target` → `link` → `page-checks` → `set-check` for the review rows.
 - Higgsfield sequence: `set-target` → `link` → `capture` → `score-candidate` → `select-candidate`.
 - Commands that edit QC reject an unlinked or `STALE` review context. Relink the current Browser-pane target after navigation, viewport changes, swaps, provenance changes, or load failure, then retry the rejected command.
-
-### Command-envelope and live-backend pitfalls
-
-- `panelId` is operation-specific, not a universal envelope field. Include it for panel-scoped operations such as `link`; omit it for global `status`. A `status` command carrying `panelId` is rejected with `panelId is not allowed for this op`.
-- Prefer the injected `$HERMES_DASHBOARD_SESSION_TOKEN`. If the agent shell does not inherit it but Desktop is live, identify the `hermes_cli.main serve` PID, read that process environment without printing the token, and derive its listening port with `lsof`. Treat this as endpoint discovery; never log or persist the token.
-- After `link`, verify with `status`; if the acknowledgement wrapper does not expose `reviewContext` where expected, read `GET /state` with the same bearer token rather than guessing the schema. Summarize `panelId`, `targetId`, `profileId`, `mediaKind`, `stale/staleReason`, and `providerJobId`. An empty `providerJobId` is a real provenance gap and must be reported, not inferred from the URL.
+- `panelId` is a **top-level** command field and is accepted only by panel-scoped ops (`set-target`, `link`, `capture`). It is rejected everywhere else (`status`, `score-candidate`, `select-candidate`) with `panelId is not allowed for this op`. Never put `panelId` inside `payload`.
+- `set-target` payload is a typed contract: keys ⊆ `{url, preset, width, height, providerEvidence}` and `url` is required. `width`/`height` are integers ≥240 (Tablet preview: `{"preset":"tablet","width":768,"height":1024}`). `providerEvidence` follows the ImgGen2-native contract (`source:"imggen2-native"` + bounded fields).
+- After `link`, verify with `status`; summarize `panelId`, `targetId`, `profileId`, `mediaKind`, `stale/staleReason`, and `providerJobId`. An empty `providerJobId` is a real provenance gap and must be reported, not inferred from the URL.
 ## Non-billable verification
 
-Use an existing feed screenshot or the package fixture. A valid dry run is: create artifact directory → write request/provenance → copy capture → validate/write QC JSON → import it through the real pane → show the recommendation. Explicitly record `billableActionsExecuted: []`.
+Use an existing feed screenshot or the package fixture. A valid dry run is: create artifact directory → write request/provenance with `creditApproval: false` → copy capture → validate/write QC JSON → write and validate a Midjourney `grid` handoff receipt → import it through the real pane → show the PASS recommendation. Explicitly record `billableActionsExecuted: []`; do not submit, upscale, vary, read secrets, or make any billable action.
 
 Zero-cost E2E smoke (isolated, repeatable): resolve the Hermes backend interpreter first (`PY="$HERMES_HOME/hermes-agent/venv/bin/python"`; fall back to `python3` only when that file is absent), then run `$PY "$HERMES_HOME/plugins/renderline-telegram/e2e_smoke.py"`. This avoids a system-Python/compiled-`pydantic_core` mismatch while exercising the same FastAPI environment as Desktop. The smoke runs the full simulated chain — bridge create/attach/review → `request_selection(B)` → Desktop relay ack on the real WORKBENCH_CORE → `plugin_api` ack write → readback → bridge commit — plus an imggen2-native provenance persist/restore round-trip check (`providerJobId` must survive an emulated Desktop restart) and negative paths (stale revision, cross-scope, used reply token), entirely under a temp `HERMES_HOME`, and proves production state is untouched. Prints `E2E-OK` on success. Run both regression suites with the same `$PY`: `-m unittest discover -s "$HERMES_HOME/plugins/renderline-telegram" -p 'test_*.py'` and `-s "$HERMES_HOME/plugins/renderline/dashboard" -p 'test_*.py'`. For current Higgsfield CLI readback use `higgsfield generate list --json` or `higgsfield generate get <job_id> --json`; legacy `show_generations` is not a valid command.
 
 ## Recovery
 
-- Managed install drift is repaired by `~/.hermes/scripts/renderline-update-reconcile.py`, launched by `com.eusin.renderline.reconcile` on Hermes/Renderline update paths and every five minutes. It runs the canonical source suite, performs a transactional `--update`, verifies managed hashes and dashboard tests, and rolls back on post-install failure. Unknown compatibility failures create `~/.hermes/state/renderline-reconcile/needs-adaptive-patch.json`; the local `Renderline adaptive compatibility repair` cron patches only the canonical source, reruns the full suite, and invokes the same transactional reconciler.
-- Inspect `~/.hermes/state/renderline-reconcile/latest.json` and `~/.hermes/logs/renderline-reconcile.log` before manual intervention. Use `node ~/src/Renderline/scripts/install.mjs --verify` for an immediate managed-file check. Do not hand-edit installed copies; patch `~/src/Renderline`, test, then run the reconciler with `--force`.
+- Managed legacy v2 contains exactly six known files. Current managed v3 contains exactly seven known files, adding `scripts/handoff-receipt.mjs`; do not infer or manage other files.
+- Inspect `~/.hermes/state/renderline-reconcile/latest.json` and `~/.hermes/logs/renderline-reconcile.log` before manual intervention. Use `node ~/src/Renderline/scripts/install.mjs --verify` to verify the canonical source manifest and `node ~/src/Renderline/scripts/install.mjs --verify-installed` to verify the installed managed files. Do not hand-edit installed copies; patch `~/src/Renderline`, test, then run the reconciler with `--force`.
 - Login missing: stop and ask the user to authenticate manually in the persistent Browser pane.
 - Import rejected: preserve the pane's prior state, fix only the reported schema violation, and import once more.
+- Delivery blocked: do not bypass `DELIVERY_BLOCKED`. Repair the reported missing receipt stage, recapture/relink or re-QC as required, select one present `PASS` candidate, and validate a new receipt before delivery.
+- Unsupported, external, or no-provider profile: keep the artifact local-only; do not submit, select, or deliver it.
 - Internal Browser pane unavailable: stop as `internal_pane_unavailable`; do not launch or reuse an external browser.
 - Capture unavailable: use a background screenshot scoped to `app="Hermes"`; do not access browser storage.
 - Uncertain submit/upscale click: stop. Inspect rendered UI before any retry.

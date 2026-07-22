@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import test from 'node:test'
+import { verifyHandoffReceipt } from '../scripts/handoff-receipt.mjs'
 
 import {
   blankCandidate,
@@ -64,6 +65,232 @@ function loadRuntimeCore() {
   const source = pluginSource.slice(start + begin.length, finish)
   return Function(`${source}\nreturn { DEFAULT_STATE, persistedState, restoredState, restoredProviderEvidence, validateQcDocument, validateAgentCommand, validateHiggsfieldControlPayload, HIGGSFIELD_MODELS, HIGGSFIELD_ASPECTS, HIGGSFIELD_GENERATION_STATUSES, applyAgentCommand, agentStatusSnapshot, PROVIDERS, PROVIDER_IDS, providerEvidenceFor, providerForProfile, qcProfileFor, reviewContextMatches, panelLinkedToQc, updatePanelState, linkPanelState, swapPanelsState, markPanelLoadFailedState, providerEvidenceIdentity, midjourneyJobLocation, midjourneyProviderEvidenceForUrl, sameMidjourneyCandidateSwitch, setRuntimeState(value) { state = { ...DEFAULT_STATE, ...value } } }`)()
 }
+function loadSelectionRelayRuntime() {
+  const coreBegin = '// WORKBENCH_CORE_BEGIN'
+  const coreEnd = '// WORKBENCH_CORE_END'
+  const relayBegin = 'const relayedSelectionRequestIds = new Set()'
+  const relayEnd = 'function useWorkbench()'
+  const candidateBegin = 'function candidateHasReview(candidate)'
+  const candidateEnd = 'function ReadinessRow'
+  const core = pluginSource.slice(pluginSource.indexOf(coreBegin) + coreBegin.length, pluginSource.indexOf(coreEnd))
+  const relay = pluginSource.slice(pluginSource.indexOf(relayBegin), pluginSource.indexOf(relayEnd))
+  const candidate = pluginSource.slice(pluginSource.indexOf(candidateBegin), pluginSource.indexOf(candidateEnd))
+  return Function('verifyHandoffReceipt', `${core}
+function setState(patch) { state = { ...state, ...patch } }
+${relay}
+${candidate}
+return {
+  DEFAULT_STATE,
+  relayPendingSelection,
+  setRuntimeState(value) { state = { ...DEFAULT_STATE, ...value } },
+  getRuntimeState() { return state }
+}`)(verifyHandoffReceipt)
+}
+function loadHiggsfieldRelayRuntime(browser) {
+  const coreBegin = '// WORKBENCH_CORE_BEGIN'
+  const coreEnd = '// WORKBENCH_CORE_END'
+  const relayBegin = 'const relayedSelectionRequestIds = new Set()'
+  const relayEnd = 'function useWorkbench()'
+  const higgsfieldBegin = 'const HIGGSFIELD_SELECTOR_REGISTRY = Object.freeze('
+  const higgsfieldEnd = 'const MIDJOURNEY_CAPABILITIES = Object.freeze('
+  const core = pluginSource.slice(pluginSource.indexOf(coreBegin) + coreBegin.length, pluginSource.indexOf(coreEnd))
+  const relay = pluginSource.slice(pluginSource.indexOf(relayBegin), pluginSource.indexOf(relayEnd))
+  const higgsfield = pluginSource.slice(pluginSource.indexOf(higgsfieldBegin), pluginSource.indexOf(higgsfieldEnd))
+  const candidateBegin = 'function candidateHasReview(candidate)'
+  const candidateEnd = 'function ReadinessRow'
+  const candidate = pluginSource.slice(pluginSource.indexOf(candidateBegin), pluginSource.indexOf(candidateEnd))
+  return Function('verifyHandoffReceipt', 'window', `${core}
+function setState(patch) { state = { ...state, ...patch } }
+${relay}
+${higgsfield}
+${candidate}
+return {
+  DEFAULT_STATE,
+  relayPendingSelection,
+  runHiggsfieldControl,
+  setRuntimeState(value) { state = { ...DEFAULT_STATE, ...value } },
+  getRuntimeState() { return state },
+  setWebview(panelId, webview) { browserWebviews.set(panelId, webview) }
+}`)(verifyHandoffReceipt, { hermesDesktop: { browser } })
+}
+
+function relayRequest(requestId = 'selection-request') {
+  return {
+    version: 1,
+    request_id: requestId,
+    candidate_id: 'A',
+    revision: 7,
+    run_id: 'relay-run',
+    scope: 'renderline'
+  }
+}
+
+function persistedRelayState(runtime, { profileId = 'midjourney', providerEvidence, capture, disposition = 'PASS' } = {}) {
+  const current = structuredClone(runtime.DEFAULT_STATE)
+  const evidence = providerEvidence === undefined
+    ? profileId === 'midjourney'
+      ? { source: 'midjourney' }
+      : { source: 'higgsfield-web', mediaType: profileId === 'higgsfield-video' ? 'video' : 'image' }
+    : providerEvidence
+  const url = 'https://example.test/relay-result.png'
+  current.qcTargetPanelId = 'result'
+  current.qcProfile = profileId
+  current.browserPanels.result = {
+    ...current.browserPanels.result,
+    url,
+    targetId: 'relay-target',
+    providerEvidence: evidence
+  }
+  current.reviewContext = {
+    contextId: 'relay-context',
+    panelId: 'result',
+    targetId: 'relay-target',
+    profileId,
+    providerEvidence: evidence,
+    stale: false
+  }
+  current.capture = capture === undefined
+    ? { panelId: 'result', targetId: 'relay-target', url, path: '/tmp/relay-result.png' }
+    : capture
+  current.job = { ...current.job, id: 'relay-run', state: 'QC_RUNNING' }
+  current.candidates.A = {
+    ...current.candidates.A,
+    summary: 'Reviewed relay candidate',
+    score: 95,
+    disposition
+  }
+  return current
+}
+
+async function relayWith(runtime, current, request, { failPost = false } = {}) {
+  const calls = []
+  runtime.setRuntimeState(current)
+  await runtime.relayPendingSelection({
+    rest: async (path, options) => {
+      calls.push({ path, options })
+      if (path === '/selection-request') return request
+      if (failPost) throw new Error('sidecar unavailable')
+      return {}
+    }
+  })
+  return calls
+}
+test('selection relay posts exact acknowledgements only for persisted deliverable receipts and retries failed posts', async () => {
+  for (const profileId of ['midjourney', 'higgsfield-image', 'higgsfield-video']) {
+    const runtime = loadSelectionRelayRuntime()
+    const request = relayRequest(`${profileId}-pass`)
+    const calls = await relayWith(runtime, persistedRelayState(runtime, { profileId }), request)
+    assert.deepEqual(calls, [
+      { path: '/selection-request', options: undefined },
+      {
+        path: '/selection-ack',
+        options: {
+          method: 'POST',
+          body: {
+            version: 1,
+            request_id: request.request_id,
+            ok: true,
+            candidate_id: 'A',
+            contextId: 'relay-context',
+            revision: 7
+          }
+        }
+      }
+    ])
+  }
+
+  const blockedCases = [
+    ['missing', { capture: null }],
+    ['invalid', { capture: { panelId: 'result', targetId: 'other-target', url: 'https://example.test/relay-result.png', path: '/tmp/relay-result.png' } }],
+    ['local-only', { providerEvidence: { source: 'local' } }],
+    ['design', { profileId: 'design' }],
+    ['ImgGen2', { profileId: 'imggen2-image' }],
+    ['non-PASS', { disposition: 'REPAIR' }],
+    ['image-with-video-evidence', { profileId: 'higgsfield-image', providerEvidence: { source: 'higgsfield-web', mediaType: 'video' } }],
+    ['video-with-image-evidence', { profileId: 'higgsfield-video', providerEvidence: { source: 'higgsfield-web', mediaType: 'image' } }],
+    ['empty-evidence', { profileId: 'higgsfield-image', providerEvidence: {} }],
+    ['audio-evidence', { profileId: 'higgsfield-image', providerEvidence: { source: 'higgsfield-web', mediaType: 'audio' } }],
+    ['3D-evidence', { profileId: 'higgsfield-image', providerEvidence: { source: 'higgsfield-web', mediaType: '3d' } }],
+    ['unknown-media-evidence', { profileId: 'higgsfield-image', providerEvidence: { source: 'higgsfield-web', mediaType: 'unknown' } }]
+  ]
+  for (const [name, stateOptions] of blockedCases) {
+    const runtime = loadSelectionRelayRuntime()
+    const request = relayRequest(`blocked-${name}`)
+    const calls = await relayWith(runtime, persistedRelayState(runtime, stateOptions), request)
+    assert.deepEqual(calls, [
+      { path: '/selection-request', options: undefined },
+      {
+        path: '/selection-ack',
+        options: {
+          method: 'POST',
+          body: {
+            version: 1,
+            request_id: request.request_id,
+            ok: false,
+            error: 'DELIVERY_BLOCKED'
+          }
+        }
+      }
+    ], name)
+    assert.equal(runtime.getRuntimeState().selectedCandidate, null, `${name} must not select a blocked candidate`)
+  }
+
+  const blockedRuntime = loadSelectionRelayRuntime()
+  const blockedRequest = relayRequest('blocked-retry-after-post-failure')
+  const blockedCurrent = persistedRelayState(blockedRuntime, { capture: null })
+  assert.equal((await relayWith(blockedRuntime, blockedCurrent, blockedRequest, { failPost: true })).length, 2)
+  assert.equal((await relayWith(blockedRuntime, blockedCurrent, blockedRequest)).length, 2)
+  assert.deepEqual(await relayWith(blockedRuntime, blockedCurrent, blockedRequest), [
+    { path: '/selection-request', options: undefined }
+  ])
+  const runtime = loadSelectionRelayRuntime()
+  const request = relayRequest('retry-after-post-failure')
+  const current = persistedRelayState(runtime)
+  const failed = await relayWith(runtime, current, request, { failPost: true })
+  assert.equal(failed.length, 2)
+  const retried = await relayWith(runtime, current, request)
+  assert.equal(retried.length, 2)
+  const remembered = await relayWith(runtime, current, request)
+  assert.deepEqual(remembered, [{ path: '/selection-request', options: undefined }])
+})
+test('Higgsfield Web observation and link produce image evidence accepted by the selection relay', async () => {
+  const pageUrl = 'https://app.higgsfield.ai/create'
+  const resultUrl = 'https://cdn.higgsfield.ai/results/image.png?token=secret'
+  const browser = {
+    control: async (guestId, request) => {
+      assert.equal(guestId, 42)
+      assert.equal(request.op, 'observeHiggsfield')
+      return {
+        guestWebContentsId: 42,
+        url: pageUrl,
+        selectedModel: 'Nano Banana 2',
+        selectedAspect: '1:1',
+        unlimited: true,
+        generationStatus: 'complete',
+        results: [{ url: resultUrl, providerJobId: 'hf-image-job' }]
+      }
+    }
+  }
+  const runtime = loadHiggsfieldRelayRuntime(browser)
+  const initial = structuredClone(runtime.DEFAULT_STATE)
+  initial.browserPanels.result = { ...initial.browserPanels.result, url: pageUrl, targetId: 'higgsfield-target' }
+  runtime.setRuntimeState(initial)
+  runtime.setWebview('result', { getWebContentsId: () => 42, getURL: () => pageUrl })
+
+  const observed = await runtime.runHiggsfieldControl('result', { action: 'observe' })
+  await runtime.runHiggsfieldControl('result', { action: 'link', observationReceipt: observed.detail.observationReceipt })
+
+  const linked = runtime.getRuntimeState()
+  assert.equal(linked.reviewContext.providerEvidence.mediaType, 'image')
+  assert.equal(linked.browserPanels.result.url, 'https://cdn.higgsfield.ai/results/image.png')
+
+  linked.job = { ...linked.job, id: 'relay-run', state: 'QC_RUNNING' }
+  linked.capture = { panelId: 'result', targetId: linked.reviewContext.targetId, url: linked.browserPanels.result.url, path: '/tmp/higgsfield-result.png' }
+  linked.candidates.A = { ...linked.candidates.A, summary: 'Reviewed Higgsfield image', score: 95, disposition: 'PASS' }
+  const request = relayRequest('higgsfield-web-image-producer-pass')
+  const calls = await relayWith(runtime, linked, request)
+  assert.equal(calls[1]?.options?.body?.ok, true)
+})
 
 function serializableProvider(provider) {
   return {
@@ -240,6 +467,41 @@ test('runtime persistence drops ephemeral captures and preserves durable provena
   assert.equal(restored.browserPanels.result.qcProfileHint, 'higgsfield-image')
   assert.deepEqual(restored.capture, durable)
 })
+test('3D provenance is removed and clears persisted QC state while retaining panel URLs', () => {
+  const runtime = loadRuntimeCore()
+  const saved = {
+    browserPanels: {
+      result: {
+        url: 'https://example.test/retained',
+        targetId: 'tretained-0000',
+        providerEvidence: { source: 'higgsfield-mcp', mediaType: '3d' }
+      }
+    },
+    evaluations: { design: { composition: { status: 'pass' } } },
+    job: { id: 'job-3d', state: 'QC_RUNNING', brief: '', createdAt: '', updatedAt: '' },
+    selectedCandidate: 'A',
+    qcJson: '{"stale":true}',
+    capture: { panelId: 'result', targetId: 'tretained-0000', url: 'https://example.test/retained', width: 1, height: 1, path: '/tmp/3d.png' }
+  }
+  const restored = runtime.restoredState(saved)
+  const expected = migratePersistedState(saved, runtime.DEFAULT_STATE)
+  const normalizeReferenceTargetId = state => ({
+    ...state,
+    browserPanels: {
+      ...state.browserPanels,
+      reference: { ...state.browserPanels.reference, targetId: '<generated-reference-target>' }
+    }
+  })
+  assert.deepEqual(normalizeReferenceTargetId(restored), normalizeReferenceTargetId(expected))
+  assert.equal(restored.browserPanels.result.url, 'https://example.test/retained')
+  assert.equal(restored.browserPanels.result.providerEvidence.mediaType, '')
+  assert.equal(restored.reviewContext, null)
+  assert.deepEqual(restored.evaluations, {})
+  assert.equal(restored.selectedCandidate, null)
+  assert.equal(restored.capture, null)
+  assert.equal(restored.qcJson, '')
+  assert.equal(restoredProviderEvidence({ source: 'higgsfield-mcp', mediaType: '3d' }).mediaType, '')
+})
 
 test('runtime panel identity reducers stay behaviorally aligned with the standalone QC core', () => {
   const runtime = loadRuntimeCore()
@@ -282,6 +544,19 @@ test('runtime panel identity reducers stay behaviorally aligned with the standal
   assert.equal(runtime.markPanelLoadFailedState(linked, 'reference'), linked, 'load failure on an unlinked panel stays a no-op in the runtime core')
   assert.equal(runtime.providerEvidenceIdentity(null), providerEvidenceIdentity(null))
   assert.equal(runtime.providerEvidenceIdentity(evidence), providerEvidenceIdentity(evidence))
+  const mediaTypedEvidence = { ...evidence, mediaType: 'video' }
+  assert.notEqual(providerEvidenceIdentity(evidence), providerEvidenceIdentity(mediaTypedEvidence))
+  const evidenceLinked = linkPanelState({
+    ...state,
+    browserPanels: { ...state.browserPanels, result: { ...state.browserPanels.result, providerEvidence: evidence } }
+  }, 'result', { profileId: 'higgsfield-image', contextId: 'cmedia-0000', linkedAt: NOW }, makeId)
+  const mediaTypeChanged = updatePanelState(evidenceLinked, 'result', { providerEvidence: mediaTypedEvidence }, {}, makeId)
+  assert.equal(mediaTypeChanged.reviewContext.stale, true)
+  assert.equal(mediaTypeChanged.reviewContext.staleReason, 'provenance-changed')
+  assert.deepEqual(
+    runtime.updatePanelState(structuredClone(evidenceLinked), 'result', { providerEvidence: mediaTypedEvidence }, {}, makeId),
+    mediaTypeChanged
+  )
 
   const mediaState = structuredClone(runtime.DEFAULT_STATE)
   mediaState.browserPanels.reference = { ...mediaState.browserPanels.reference, url: 'https://cdn.example.test/shot.png', targetId: 'tmedia-0000' }
@@ -360,25 +635,34 @@ test('runtime provider registry stays behaviorally aligned with the standalone Q
   assert.equal(runtime.PROVIDERS.midjourney.qcDocument.validate, runtime.validateQcDocument, 'runtime adapter must reuse the schema-v1 validator')
 })
 
-test('runtime Higgsfield MCP provenance extraction stays aligned with the standalone QC core', () => {
+test('runtime Higgsfield MCP provenance extraction rejects declared 3D media and stays aligned with the standalone QC core', () => {
   const runtime = loadRuntimeCore()
-  const input = {
-    src: 'https://cdn.example.test/result.mp4',
-    toolName: 'mcp__higgsfield__show_generations',
-    toolResult: {
-      structuredContent: {
-        items: [{
-          id: 'video-job', model: 'seedance_2_0', status: 'completed', type: 'video',
-          params: { aspect_ratio: '9:16', duration: 5, resolution: '720p' },
-          results: { rawUrl: 'https://cdn.example.test/result.mp4' }
-        }]
+  const toolName = 'mcp__higgsfield__show_generations'
+  const cases = [
+    ['declared 3D video URL', 'https://cdn.example.test/model.mp4', '3D', null],
+    ['declared image video URL', 'https://cdn.example.test/still.mp4', 'image', 'image'],
+    ['missing type video URL', 'https://cdn.example.test/result.mp4', undefined, 'video'],
+    ['missing type image URL', 'https://cdn.example.test/result.png', undefined, 'image']
+  ]
+  for (const [label, src, type, expectedMediaType] of cases) {
+    const input = {
+      src,
+      toolName,
+      toolResult: {
+        structuredContent: {
+          items: [{
+            id: 'media-job', model: 'seedream_v5_pro', status: 'completed',
+            ...(type === undefined ? {} : { type }),
+            results: { rawUrl: src }
+          }]
+        }
       }
     }
+    const actual = runtime.providerEvidenceFor(input)
+    const expected = providerEvidenceFor(input)
+    assert.deepEqual(actual && { ...actual, checkedAt: '' }, expected && { ...expected, checkedAt: '' }, label)
+    assert.equal(actual?.mediaType ?? null, expectedMediaType, label)
   }
-
-  const actual = runtime.providerEvidenceFor(input)
-  const expected = providerEvidenceFor(input)
-  assert.deepEqual({ ...actual, checkedAt: '' }, { ...expected, checkedAt: '' })
 })
 
 test('runtime QC target routing and Browser-to-QC controls stay connected', () => {

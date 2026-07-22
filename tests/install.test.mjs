@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
@@ -14,6 +15,7 @@ const sourceBackendInit = await readFile(join(root, 'backend', '__init__.py'), '
 const sourceDashboardManifest = await readFile(join(root, 'dashboard', 'manifest.json'), 'utf8')
 const sourceDashboardApi = await readFile(join(root, 'dashboard', 'plugin_api.py'), 'utf8')
 const sourceSidecarApi = await readFile(join(root, 'sidecar', 'app.py'), 'utf8')
+const sourceReceipt = await readFile(join(root, 'scripts', 'handoff-receipt.mjs'), 'utf8')
 const sourceControlCli = await readFile(join(root, 'scripts', 'midjourney-control.mjs'), 'utf8')
 
 function run(args, env = {}) {
@@ -28,6 +30,9 @@ function run(args, env = {}) {
 
 async function workspace() {
   return mkdtemp(join(tmpdir(), 'renderline-'))
+}
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex')
 }
 
 test('installs, updates with backup, and uninstalls managed plugin, skill, and dashboard files', async t => {
@@ -44,14 +49,17 @@ test('installs, updates with backup, and uninstalls managed plugin, skill, and d
   assert.equal(await readFile(join(target, 'plugins', 'renderline', '__init__.py'), 'utf8'), sourceBackendInit)
   assert.equal(await readFile(join(dashboardTarget, 'manifest.json'), 'utf8'), sourceDashboardManifest)
   assert.equal(await readFile(join(dashboardTarget, 'plugin_api.py'), 'utf8'), sourceDashboardApi)
+  assert.equal(await readFile(join(target, 'scripts', 'handoff-receipt.mjs'), 'utf8'), sourceReceipt)
   const marker = JSON.parse(await readFile(join(target, '.renderline-install.json'), 'utf8'))
+  assert.equal(marker.schemaVersion, 3)
   assert.deepEqual(marker.files.map(file => file.id), [
     'plugin',
     'skill',
     'backend-manifest',
     'backend-init',
     'dashboard-manifest',
-    'dashboard-api'
+    'dashboard-api',
+    'handoff-receipt'
   ])
 
   await writeFile(join(target, 'plugin.js'), '// locally modified\n')
@@ -77,6 +85,7 @@ test('installs, updates with backup, and uninstalls managed plugin, skill, and d
   await assert.rejects(readFile(join(target, 'plugins', 'renderline', '__init__.py')), /ENOENT/)
   await assert.rejects(readFile(join(dashboardTarget, 'manifest.json')), /ENOENT/)
   await assert.rejects(readFile(join(dashboardTarget, 'plugin_api.py')), /ENOENT/)
+  await assert.rejects(readFile(join(target, 'scripts', 'handoff-receipt.mjs')), /ENOENT/)
 })
 
 test('accepts package-runner forwarded arguments after --', async t => {
@@ -93,7 +102,7 @@ test('supports dry-run, verify, update, and compatibility errors', async t => {
   t.after(() => rm(target, { force: true, recursive: true }))
   const dry = run(['--target', target, '--dry-run'])
   assert.equal(dry.status, 0, dry.stderr)
-  assert.match(dry.stdout, /Dry run install\/update: 6 managed file\(s\) would change/)
+  assert.match(dry.stdout, /Dry run install\/update: 7 managed file\(s\) would change/)
   await assert.rejects(readFile(join(target, 'plugin.js')), /ENOENT/)
   assert.equal(run(['--target', target, '--install']).status, 0)
   assert.equal(run(['--target', target, '--verify']).status, 0)
@@ -103,6 +112,20 @@ test('supports dry-run, verify, update, and compatibility errors', async t => {
   assert.match(incompatible.stderr, /Compatibility error.*--update/)
   assert.equal(run(['--target', target, '--update']).status, 0)
   assert.equal(run(['--target', target, '--verify']).status, 0)
+})
+test('rejects explicit install with verify-installed before mutating the filesystem', async t => {
+  for (const args of [
+    ['--install', '--verify-installed'],
+    ['--verify-installed', '--install']
+  ]) {
+    const target = await workspace()
+    t.after(() => rm(target, { force: true, recursive: true }))
+
+    const result = run(['--target', target, ...args])
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /--install, --uninstall, --verify, --verify-installed, and --rollback are mutually exclusive/)
+    assert.deepEqual(await readdir(target), [])
+  }
 })
 
 test('rolls back every managed file from its newest backup', async t => {
@@ -117,6 +140,13 @@ test('rolls back every managed file from its newest backup', async t => {
     ['plugins/renderline/dashboard/plugin_api.py', '# prior api\n']
   ]
   for (const [relative, value] of prior) await writeFile(join(target, relative), value)
+  const markerPath = join(target, '.renderline-install.json')
+  const priorMarker = JSON.parse(await readFile(markerPath, 'utf8'))
+  const ids = [
+    'plugin', 'skill', 'backend-manifest', 'backend-init', 'dashboard-manifest', 'dashboard-api'
+  ]
+  for (const [index, [, value]] of prior.entries()) priorMarker.files.find(file => file.id === ids[index]).sha256 = sha256(value)
+  await writeFile(markerPath, `${JSON.stringify(priorMarker, null, 2)}\n`)
   assert.equal(run(['--target', target, '--update']).status, 0)
   const dry = run(['--target', target, '--rollback', '--dry-run'])
   assert.equal(dry.status, 0, dry.stderr)
@@ -133,9 +163,12 @@ test('rollback restores one coherent partial-update transaction', async t => {
   t.after(() => rm(target, { force: true, recursive: true }))
   assert.equal(run(['--target', target]).status, 0)
   const skillBefore = await readFile(join(target, 'skill', 'SKILL.md'), 'utf8')
-  const markerBefore = await readFile(join(target, '.renderline-install.json'), 'utf8')
 
   await writeFile(join(target, 'plugin.js'), '// prior partial plugin\n')
+  const marker = JSON.parse(await readFile(join(target, '.renderline-install.json'), 'utf8'))
+  marker.files.find(file => file.id === 'plugin').sha256 = sha256('// prior partial plugin\n')
+  await writeFile(join(target, '.renderline-install.json'), `${JSON.stringify(marker, null, 2)}\n`)
+  const markerBefore = await readFile(join(target, '.renderline-install.json'), 'utf8')
   assert.equal(run(['--target', target, '--update']).status, 0)
 
   const dry = run(['--target', target, '--rollback', '--dry-run'])
@@ -146,6 +179,74 @@ test('rollback restores one coherent partial-update transaction', async t => {
   assert.equal(await readFile(join(target, 'plugin.js'), 'utf8'), '// prior partial plugin\n')
   assert.equal(await readFile(join(target, 'skill', 'SKILL.md'), 'utf8'), skillBefore)
   assert.equal(await readFile(join(target, '.renderline-install.json'), 'utf8'), markerBefore)
+})
+test('rejects corrupted or swapped rollback backups before restoring any files', async t => {
+  for (const mutation of ['corrupt', 'swap']) {
+    const target = await workspace()
+    t.after(() => rm(target, { force: true, recursive: true }))
+    const markerPath = join(target, '.renderline-install.json')
+    const pluginPrior = '// authenticated prior plugin\n'
+    const skillPrior = '# authenticated prior skill\n'
+
+    assert.equal(run(['--target', target]).status, 0)
+    await writeFile(join(target, 'plugin.js'), pluginPrior)
+    await writeFile(join(target, 'skill', 'SKILL.md'), skillPrior)
+    const priorMarker = JSON.parse(await readFile(markerPath, 'utf8'))
+    priorMarker.files.find(file => file.id === 'plugin').sha256 = sha256(pluginPrior)
+    priorMarker.files.find(file => file.id === 'skill').sha256 = sha256(skillPrior)
+    await writeFile(markerPath, `${JSON.stringify(priorMarker, null, 2)}\n`)
+    assert.equal(run(['--target', target, '--update']).status, 0)
+
+    const pluginBackupPath = join(target, 'backups', 'plugin', (await readdir(join(target, 'backups', 'plugin')))[0])
+    const skillBackupPath = join(target, 'backups', 'skill', (await readdir(join(target, 'backups', 'skill')))[0])
+    if (mutation === 'corrupt') await writeFile(skillBackupPath, '# corrupted backup\n')
+    else await writeFile(skillBackupPath, await readFile(pluginBackupPath))
+
+    const markerBefore = await readFile(markerPath)
+    const rejected = run(['--target', target, '--rollback'])
+    assert.notEqual(rejected.status, 0)
+    assert.match(rejected.stderr, /backup does not match the prior marker hash/)
+    assert.equal(await readFile(join(target, 'plugin.js'), 'utf8'), sourcePlugin)
+    assert.equal(await readFile(join(target, 'skill', 'SKILL.md'), 'utf8'), sourceSkill)
+    assert.deepEqual(await readFile(markerPath), markerBefore)
+  }
+})
+test('migrates exact v2 markers, verifies installed bytes, and rejects malformed marker entries', async t => {
+  const target = await workspace()
+  const markerPath = join(target, '.renderline-install.json')
+  const receiptPath = join(target, 'scripts', 'handoff-receipt.mjs')
+  t.after(() => rm(target, { force: true, recursive: true }))
+
+  assert.equal(run(['--target', target]).status, 0)
+  const current = JSON.parse(await readFile(markerPath, 'utf8'))
+  const v2 = `${JSON.stringify({ ...current, schemaVersion: 2, files: current.files.filter(file => file.id !== 'handoff-receipt') }, null, 2)}\n`
+  await writeFile(markerPath, v2)
+  await rm(receiptPath)
+  assert.equal(run(['--target', target, '--verify-installed']).status, 0)
+  assert.equal(run(['--target', target, '--update']).status, 0)
+  assert.equal(run(['--target', target, '--rollback']).status, 0)
+  assert.equal(await readFile(markerPath, 'utf8'), v2)
+  await assert.rejects(readFile(receiptPath), /ENOENT/)
+  assert.equal(run(['--target', target, '--verify-installed']).status, 0)
+  assert.equal(await readFile(join(target, 'plugin.js'), 'utf8'), sourcePlugin)
+  assert.equal(await readFile(join(target, 'skill', 'SKILL.md'), 'utf8'), sourceSkill)
+  assert.equal(await readFile(join(target, 'plugins', 'renderline', 'plugin.yaml'), 'utf8'), sourceBackendManifest)
+  assert.equal(await readFile(join(target, 'plugins', 'renderline', '__init__.py'), 'utf8'), sourceBackendInit)
+  assert.equal(await readFile(join(target, 'plugins', 'renderline', 'dashboard', 'manifest.json'), 'utf8'), sourceDashboardManifest)
+  assert.equal(await readFile(join(target, 'plugins', 'renderline', 'dashboard', 'plugin_api.py'), 'utf8'), sourceDashboardApi)
+
+  for (const mutate of [
+    marker => { marker.files.pop() },
+    marker => { marker.files.push({ ...marker.files[0] }) },
+    marker => { marker.files.push({ id: 'extra', path: join(target, 'extra'), sha256: 'a'.repeat(64) }) },
+    marker => { marker.files[0].path = join(target, 'wrong') },
+    marker => { marker.files[0].sha256 = 'A'.repeat(64) }
+  ]) {
+    const marker = JSON.parse(v2)
+    mutate(marker)
+    await writeFile(markerPath, `${JSON.stringify(marker)}\n`)
+    assert.notEqual(run(['--target', target, '--verify-installed']).status, 0)
+  }
 })
 
 test('requires custom plugin and skill targets to be supplied together', async t => {

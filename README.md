@@ -57,6 +57,7 @@ $HERMES_HOME/plugins/renderline/plugin.yaml
 $HERMES_HOME/plugins/renderline/__init__.py
 $HERMES_HOME/plugins/renderline/dashboard/manifest.json
 $HERMES_HOME/plugins/renderline/dashboard/plugin_api.py
+$HERMES_HOME/desktop-plugins/renderline/scripts/handoff-receipt.mjs
 ~/Library/Application Support/Renderline/current/sidecar/
 ~/Library/Application Support/Renderline/venv/
 ~/Library/LaunchAgents/com.eusin.renderline.sidecar.plist
@@ -80,6 +81,15 @@ npx --yes github:HeiTuz/Renderline -- --rollback
 ```
 
 Rollback restores only files changed by that transaction, keeps unchanged managed files, removes files that did not exist in the prior marker, and restores the prior marker bytes. It never combines per-file backups from different updates.
+### Verification
+
+`--verify` checks that all seven managed files match the current package source. `--verify-installed` is read-only and checks the installed files only against their marker hashes, so it can validate an installation without a checkout-source comparison.
+
+```bash
+npx --yes github:HeiTuz/Renderline -- --verify
+npx --yes github:HeiTuz/Renderline -- --verify-installed
+```
+
 
 ### Uninstall
 
@@ -87,7 +97,7 @@ Rollback restores only files changed by that transaction, keeps unchanged manage
 npx --yes github:HeiTuz/Renderline -- --uninstall
 ```
 
-The uninstaller refuses to delete any of the six managed files when its hash changed. It pins deletion to the expected plugin, skill, backend, and dashboard paths instead of trusting paths stored in the marker. Use `--force` only when you intentionally want to remove local modifications.
+The uninstaller refuses to delete any of the seven managed files when its hash changed. It pins deletion to the expected plugin, skill, backend, dashboard, and receipt paths instead of trusting paths stored in the marker. Use `--force` only when you intentionally want to remove local modifications.
 
 ### Custom Hermes home or test target
 
@@ -125,7 +135,13 @@ It uses the existing `persist:hermes-browser` partition as-is and never reads, e
 Midjourney automation is pinned to the Browser pane inside the Hermes Desktop window. The workflow scopes desktop actions to `app="Hermes"` and explicitly forbids external Chrome, Safari, Arc, Brave, Edge, and isolated `browser_*` sessions. If the internal pane is unavailable, it stops instead of falling back to another browser.
 
 The Browser pane displays a visible **Automation target** affordance. With the privileged guest active it reads `Automation target · Hermes internal Browser pane · persist:hermes-browser`; in iframe fallback it reads `Automation target unavailable`, and the packaged workflow hard-stops as `internal_pane_unavailable` instead of retargeting any external browser or isolated `browser_*` session. Agents must re-verify this affordance from a fresh `app="Hermes"` capture immediately before every pointer, focus, or type action.
+## Delivery boundary
 
+Renderline delivers a handoff receipt only for a selected `PASS` candidate with a complete, verified receipt. It fails closed as `DELIVERY_BLOCKED` when any required evidence, selection, or receipt stage is absent or invalid; do not bypass that state. Recover by repairing the reported stage, recapturing, relinking, or re-running QC as needed, then selecting a present `PASS` candidate and validating a new receipt.
+
+3D is unsupported product-wide: it cannot be captured, reviewed, receipted, or delivered. Design, ImgGen2, and unknown external-provider profiles are local-only evidence; they may be inspected and recorded locally but cannot be submitted, selected for delivery, or used as a provider fallback.
+
+Renderline never reads, prints, exports, stores, or migrates tokens, credentials, cookies, browser storage, or control tokens. Authentication is verified visually only.
 ## Higgsfield read-only CLI inspection
 
 Existing Higgsfield jobs can still be inspected through the authenticated `higgsfield` CLI without an MCP tool card. `scripts/higgsfield-control.mjs` maps only observation subcommands (`account status`, `generate list`, `soul-id list`, `model list`, `generate get`) and has no argv passthrough, so paid or mutating subcommands are unreachable by construction.

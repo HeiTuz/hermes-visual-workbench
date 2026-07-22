@@ -20,16 +20,21 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dashboard test dependencies
-        run: python -m pip install 'fastapi>=0.100,<1' 'httpx>=0.27,<1' 'websockets>=14,<16'
+        run: python -m pip install 'fastapi>=0.100,<1' 'httpx>=0.27,<1' 'websockets>=14,<16' 'pytest>=7,<9'
+      - name: Verify sidecar acknowledgement endpoint compatibility
+        run: python3 -m pytest -q tests/test_plugin_api_compat.py
       - uses: oven-sh/setup-bun@v2
       - run: npm test
       - name: Pack and smoke npm runner
         shell: bash
         run: |
           tarball=$(npm pack --silent)
+          tar -tzf "$tarball" | grep -Fx 'package/scripts/handoff-receipt.mjs'
           npx --yes "./$tarball" -- --hermes-home "$RUNNER_TEMP/npx-hermes"
           test -f "$RUNNER_TEMP/npx-hermes/desktop-plugins/renderline/plugin.js"
           test -f "$RUNNER_TEMP/npx-hermes/skills/renderline/SKILL.md"
+          test -f "$RUNNER_TEMP/npx-hermes/desktop-plugins/renderline/scripts/handoff-receipt.mjs"
+          test "$(sha256sum scripts/handoff-receipt.mjs | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/npx-hermes/desktop-plugins/renderline/scripts/handoff-receipt.mjs" | cut -d' ' -f1)"
           test "$(sha256sum plugin.js | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/npx-hermes/desktop-plugins/renderline/plugin.js" | cut -d' ' -f1)"
           test "$(sha256sum skill/SKILL.md | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/npx-hermes/skills/renderline/SKILL.md" | cut -d' ' -f1)"
       - name: Smoke Bun runner
@@ -39,5 +44,7 @@ jobs:
           bunx --package "$GITHUB_WORKSPACE/$tarball" renderline --hermes-home "$RUNNER_TEMP/bun-hermes"
           test -f "$RUNNER_TEMP/bun-hermes/desktop-plugins/renderline/plugin.js"
           test -f "$RUNNER_TEMP/bun-hermes/skills/renderline/SKILL.md"
+          test -f "$RUNNER_TEMP/bun-hermes/desktop-plugins/renderline/scripts/handoff-receipt.mjs"
+          test "$(sha256sum scripts/handoff-receipt.mjs | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/bun-hermes/desktop-plugins/renderline/scripts/handoff-receipt.mjs" | cut -d' ' -f1)"
           test "$(sha256sum plugin.js | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/bun-hermes/desktop-plugins/renderline/plugin.js" | cut -d' ' -f1)"
           test "$(sha256sum skill/SKILL.md | cut -d' ' -f1)" = "$(sha256sum "$RUNNER_TEMP/bun-hermes/skills/renderline/SKILL.md" | cut -d' ' -f1)"

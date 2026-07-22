@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
@@ -99,7 +100,161 @@ assert "renderline-sidecar" in sidecar
 assert "_BILLABLE_LEDGER_LOCK = asyncio.Lock()" in sidecar
 print("packed-host-probe-ok")
 `
+const PLUGIN_IMPORT_LOADER = String`
+const modules = {
+  '@hermes/plugin-sdk': \`
+    export const atom = value => ({ value })
+    export const Badge = () => null
+    export const Button = () => null
+    export const Codicon = () => null
+    export const EmptyState = () => null
+    export const host = { notify() {}, panes: { setOpen() {} } }
+    export const Input = () => null
+    export const ScrollArea = () => null
+    export const Separator = () => null
+    export const Textarea = () => null
+    export const Tip = () => null
+    export const useValue = () => null
+  \`,
+  react: \`
+    export const useEffect = () => {}
+    export const useRef = value => ({ current: value })
+    export const useState = value => [value, () => {}]
+    export const useSyncExternalStore = (_subscribe, getSnapshot) => getSnapshot()
+  \`,
+  'react/jsx-runtime': \`
+    export const jsx = () => null
+    export const jsxs = () => null
+  \`
+}
+export async function resolve(specifier, context, nextResolve) {
+  if (Object.hasOwn(modules, specifier)) {
+    return { shortCircuit: true, url: 'data:text/javascript,' + encodeURIComponent(modules[specifier]) }
+  }
+  return nextResolve(specifier, context)
+}
+`
 
+const INSTALLED_RELAY_PROBE = String.raw`
+import assert from 'node:assert/strict'
+import { pathToFileURL } from 'node:url'
+
+const [checkoutEntry, installedEntry, qcCoreEntry] = process.argv.slice(2)
+const NOW = '2026-07-17T00:00:00.000Z'
+
+async function state(entry, disposition = 'PASS', capture = true) {
+  globalThis.setInterval = () => 1
+  globalThis.clearInterval = () => {}
+  let defaults
+  const { default: plugin } = await import(pathToFileURL(entry).href + '?relay-fixture')
+  plugin.register({
+    storage: {
+      get(_key, fallback) { return fallback },
+      set(key, value) {
+        if (key === 'workbench.v7') defaults = structuredClone(value)
+      }
+    },
+    socket() {},
+    onDispose() {},
+    registerMany() {}
+  })
+  assert.ok(defaults, 'plugin did not persist its restored default state')
+
+  const { linkPanelState } = await import(pathToFileURL(qcCoreEntry).href)
+  const url = 'https://www.midjourney.com/jobs/11111111-1111-4111-8111-111111111111'
+  const targetId = 'trelay-0000'
+  const linked = linkPanelState({
+    ...defaults,
+    browserPanels: {
+      ...defaults.browserPanels,
+      result: { ...defaults.browserPanels.result, url, targetId }
+    }
+  }, 'result', {
+    profileId: 'midjourney',
+    contextId: 'crelay-0000',
+    linkedAt: NOW
+  })
+  return {
+    ...linked,
+    capture: capture ? {
+      panelId: 'result',
+      targetId,
+      url,
+      width: 1440,
+      height: 900,
+      viewport: { preset: 'desktop', width: 1440, height: 900, responsive: false },
+      createdAt: NOW,
+      path: '/tmp/relay-result.png'
+    } : null,
+    job: { ...linked.job, id: 'relay-run', state: 'QC_RUNNING', createdAt: NOW, updatedAt: NOW },
+    candidates: {
+      ...linked.candidates,
+      A: { ...linked.candidates.A, summary: 'Reviewed relay candidate', score: 95, disposition }
+    }
+  }
+}
+
+async function relay(entry, name, current, requestId, failPost = false) {
+  let tick
+  globalThis.setInterval = callback => {
+    tick = callback
+    return 1
+  }
+  globalThis.clearInterval = () => {}
+  const { default: plugin } = await import(pathToFileURL(entry).href + '?relay-probe=' + name)
+  const calls = []
+  plugin.register({
+    storage: {
+      get(key, fallback) { return key === 'workbench.v7' ? current : fallback },
+      set() {}
+    },
+    socket() {},
+    onDispose() {},
+    registerMany() {},
+    async rest(path, options) {
+      calls.push({ path, options })
+      if (path === '/selection-request') {
+        return { version: 1, request_id: requestId, candidate_id: 'A', revision: 7, run_id: 'relay-run', scope: 'renderline' }
+      }
+      if (failPost) throw new Error('sidecar unavailable')
+      return {}
+    }
+  })
+  assert.equal(typeof tick, 'function', name + ' did not register relay timer')
+  return {
+    calls,
+    tick,
+    setFailPost(value) { failPost = value }
+  }
+}
+
+for (const [label, entry] of [['checkout', checkoutEntry], ['installed', installedEntry]]) {
+  const pass = await relay(entry, label + '-pass', await state(entry), label + '-pass')
+  await pass.tick()
+  assert.deepEqual(pass.calls, [
+    { path: '/selection-request', options: undefined },
+    { path: '/selection-ack', options: { method: 'POST', body: { version: 1, request_id: label + '-pass', ok: true, candidate_id: 'A', contextId: 'crelay-0000', revision: 7 } } }
+  ], label + ' PASS acknowledgement')
+
+  const blocked = await relay(entry, label + '-blocked', await state(entry, 'PASS', false), label + '-blocked')
+  await blocked.tick()
+  assert.deepEqual(blocked.calls, [
+    { path: '/selection-request', options: undefined },
+    { path: '/selection-ack', options: { method: 'POST', body: { version: 1, request_id: label + '-blocked', ok: false, error: 'DELIVERY_BLOCKED' } } }
+  ], label + ' blocked acknowledgement')
+
+  const retry = await relay(entry, label + '-retry', await state(entry), label + '-retry', true)
+  await retry.tick()
+  assert.equal(retry.calls.length, 2, label + ' failed POST')
+  retry.setFailPost(false)
+  await retry.tick()
+  assert.deepEqual(retry.calls.slice(2), [
+    { path: '/selection-request', options: undefined },
+    { path: '/selection-ack', options: { method: 'POST', body: { version: 1, request_id: label + '-retry', ok: true, candidate_id: 'A', contextId: 'crelay-0000', revision: 7 } } }
+  ], label + ' retries failed POST')
+}
+console.log('installed-relay-probe-ok')
+`
 function command(command, args, cwd) {
   return spawnSync(command, args, { cwd, encoding: 'utf8' })
 }
@@ -115,6 +270,7 @@ test('packed archive contains installer sources and installs from packed bytes',
   assert.equal(listing.status, 0, listing.stderr)
   assert.match(listing.stdout, /^package\/backend\/plugin.yaml$/m)
   assert.match(listing.stdout, /^package\/backend\/__init__.py$/m)
+  assert.match(listing.stdout, /^package\/scripts\/handoff-receipt\.mjs$/m)
   assert.doesNotMatch(listing.stdout, /^package\/fixtures\//m)
 
   const project = join(directory, 'project')
@@ -130,10 +286,24 @@ test('packed archive contains installer sources and installs from packed bytes',
   const installed = run(['--install'])
   assert.equal(installed.status, 0, installed.stderr)
   assert.equal(await readFile(join(home, 'desktop-plugins', 'renderline', 'plugin.js'), 'utf8'), await readFile(join(packageRoot, 'plugin.js'), 'utf8'))
+  assert.equal(await readFile(join(home, 'desktop-plugins', 'renderline', 'scripts', 'handoff-receipt.mjs'), 'utf8'), await readFile(join(packageRoot, 'scripts', 'handoff-receipt.mjs'), 'utf8'))
   assert.equal(run(['--verify']).status, 0)
   const repeated = run(['--install'])
   assert.equal(repeated.status, 0, repeated.stderr)
   assert.match(repeated.stdout, /Verified Renderline/)
+  const loader = join(directory, 'plugin-import-loader.mjs')
+  const relayProbe = join(directory, 'installed-relay-probe.mjs')
+  await writeFile(loader, PLUGIN_IMPORT_LOADER)
+  await writeFile(relayProbe, INSTALLED_RELAY_PROBE)
+  const relayRun = command(process.execPath, [
+    '--experimental-loader', loader,
+    relayProbe,
+    join(root, 'plugin.js'),
+    join(home, 'desktop-plugins', 'renderline', 'plugin.js'),
+    join(packageRoot, 'scripts', 'qc-core.mjs')
+  ], project)
+  assert.equal(relayRun.status, 0, relayRun.stderr)
+  assert.equal(relayRun.stdout.trim(), 'installed-relay-probe-ok')
 
   const hostProbe = command('python3', ['-c', PACKED_HOST_PROBE, packageRoot, home], project)
   assert.equal(hostProbe.status, 0, hostProbe.stderr)
@@ -155,6 +325,12 @@ test('packed archive contains installer sources and installs from packed bytes',
     if (error.code !== 'ENOENT') throw error
     await writeFile(join(home, relative), contents)
   })
+  const markerPath = join(home, 'desktop-plugins', 'renderline', '.renderline-install.json')
+  const priorMarker = JSON.parse(await readFile(markerPath, 'utf8'))
+  for (const file of priorMarker.files) {
+    file.sha256 = createHash('sha256').update(await readFile(file.path)).digest('hex')
+  }
+  await writeFile(markerPath, `${JSON.stringify(priorMarker, null, 2)}\n`)
   const updated = run(['--update'])
   assert.equal(updated.status, 0, updated.stderr)
   const rolledBack = run(['--rollback'])

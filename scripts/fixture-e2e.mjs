@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { basename, extname, join, resolve } from 'node:path'
 
 import { blankCandidate, CANDIDATE_IDS, QC_DIMENSIONS, validateQcDocument } from './qc-core.mjs'
+import { verifyHandoffReceipt } from './handoff-receipt.mjs'
 
 const PACKAGE_ROOT = resolve(import.meta.dirname, '..')
 
@@ -83,18 +84,47 @@ async function main() {
     cookieDataAccessed: false,
     credentialsEntered: false
   }
+  const capture = { path: join(jobDir, captureName), targetId: `fixture-${jobId}` }
+  const receipt = {
+    schemaVersion: 1,
+    provider: 'midjourney',
+    assetKind: 'grid',
+    link: { contextId: `fixture-${jobId}`, targetId: capture.targetId },
+    capture,
+    qc: {
+      candidates: qc.candidates.map(({ id, score, disposition }) => ({ id, score, disposition }))
+    },
+    select: { candidateId: qc.selectedCandidate }
+  }
+
+  const handoff = verifyHandoffReceipt(receipt)
+  if (!handoff.ok || handoff.selectedCandidate !== 'A') throw new Error('fixture handoff receipt failed')
 
   await Promise.all([
     writeFile(join(jobDir, 'request.json'), `${JSON.stringify(request, null, 2)}\n`),
     writeFile(join(jobDir, 'provenance.json'), `${JSON.stringify(provenance, null, 2)}\n`),
-    writeFile(join(jobDir, 'qc.json'), `${JSON.stringify(qc, null, 2)}\n`)
+    writeFile(join(jobDir, 'qc.json'), `${JSON.stringify(qc, null, 2)}\n`),
+    writeFile(join(jobDir, 'handoff-receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`)
   ])
 
   const readback = validateQcDocument(await readFile(join(jobDir, 'qc.json'), 'utf8'))
-  if (readback.selectedCandidate !== 'A' || readback.candidates.map(item => item.id).join('') !== CANDIDATE_IDS.join('')) {
-    throw new Error('fixture QC readback failed')
+  const receiptReadback = verifyHandoffReceipt(JSON.parse(await readFile(join(jobDir, 'handoff-receipt.json'), 'utf8')))
+  if (
+    readback.selectedCandidate !== 'A' ||
+    readback.candidates.map(item => item.id).join('') !== CANDIDATE_IDS.join('') ||
+    !receiptReadback.ok ||
+    receiptReadback.selectedCandidate !== 'A'
+  ) {
+    throw new Error('fixture artifact readback failed')
   }
-  console.log(JSON.stringify({ ok: true, jobId, jobDir, capture: join(jobDir, captureName), qc: join(jobDir, 'qc.json') }))
+  console.log(JSON.stringify({
+    ok: true,
+    jobId,
+    jobDir,
+    capture: capture.path,
+    qc: join(jobDir, 'qc.json'),
+    receipt: join(jobDir, 'handoff-receipt.json')
+  }))
 }
 
 main().catch(error => {

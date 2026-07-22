@@ -12,15 +12,16 @@ export function parseArgs(argv) {
   const args = [...argv]
   while (args[0] === '--') args.shift()
 
-  const options = { dryRun: false, force: false, help: false, hermesHome: '', rollback: false, skillTarget: '', target: '', uninstall: false, update: false, verify: false }
+  const options = { dryRun: false, force: false, help: false, hermesHome: '', install: false, rollback: false, skillTarget: '', target: '', uninstall: false, update: false, verify: false, verifyInstalled: false }
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
     if (arg === '--force') options.force = true
     else if (arg === '--dry-run') options.dryRun = true
-    else if (arg === '--install') {}
+    else if (arg === '--install') options.install = true
     else if (arg === '--update') options.update = true
     else if (arg === '--verify') options.verify = true
+    else if (arg === '--verify-installed') options.verifyInstalled = true
     else if (arg === '--rollback') options.rollback = true
     else if (arg === '--help' || arg === '-h') options.help = true
     else if (arg === '--uninstall') options.uninstall = true
@@ -42,10 +43,13 @@ export function parseArgs(argv) {
   if (options.force && !options.uninstall) {
     throw new Error('--force is only valid with --uninstall')
   }
-  if ([options.uninstall, options.verify, options.rollback].filter(Boolean).length > 1) {
-    throw new Error('--uninstall, --verify, and --rollback are mutually exclusive')
+  if ([options.install, options.uninstall, options.verify, options.verifyInstalled, options.rollback].filter(Boolean).length > 1) {
+    throw new Error('--install, --uninstall, --verify, --verify-installed, and --rollback are mutually exclusive')
   }
-  if (options.dryRun && (options.uninstall || options.verify)) {
+  if (options.verifyInstalled && options.update) {
+    throw new Error('--verify-installed cannot be combined with --update')
+  }
+  if (options.dryRun && (options.uninstall || options.verify || options.verifyInstalled)) {
     throw new Error('--dry-run is valid only with install, update, or rollback')
   }
 

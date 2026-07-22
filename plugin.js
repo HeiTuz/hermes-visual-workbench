@@ -1,3 +1,4 @@
+import { verifyHandoffReceipt } from './scripts/handoff-receipt.mjs'
 import {
   atom,
   Badge,
@@ -226,6 +227,8 @@ function restoredState(saved) {
   const source = isRecord(saved) ? saved : {}
   const legacyUrl = typeof source.browserUrl === 'string' ? source.browserUrl : ''
   const savedCandidates = isRecord(source.candidates) ? source.candidates : {}
+  const unsupported3d = Object.values(source.browserPanels || {}).some(panel => panel?.providerEvidence?.mediaType === '3d') ||
+    source.reviewContext?.providerEvidence?.mediaType === '3d'
   const browserPanels = {
     result: restoredPanel(source.browserPanels?.result, DEFAULT_BROWSER_PANELS.result, legacyUrl),
     reference: restoredPanel(source.browserPanels?.reference, DEFAULT_BROWSER_PANELS.reference)
@@ -262,6 +265,15 @@ function restoredState(saved) {
     restored.candidates = blankCandidates()
     restored.selectedCandidate = null
     restored.qcJson = ''
+  }
+  if (unsupported3d) {
+    restored.reviewContext = null
+    restored.evaluations = {}
+    restored.job = blankJob()
+    restored.candidates = blankCandidates()
+    restored.selectedCandidate = null
+    restored.qcJson = ''
+    restored.capture = null
   }
   return restored
 }
@@ -397,7 +409,7 @@ function restoredProviderEvidence(value) {
     status: boundedMetadataString(value.status, 64),
     model: boundedMetadataString(value.model, 128),
     soulId: boundedMetadataString(value.soulId, 128),
-    mediaType: ['image', 'video', 'audio', '3d'].includes(value.mediaType) ? value.mediaType : '',
+    mediaType: ['image', 'video', 'audio'].includes(value.mediaType) ? value.mediaType : '',
     prompt: boundedMetadataString(value.prompt),
     width,
     height,
@@ -414,7 +426,7 @@ function restoredProviderEvidence(value) {
 function providerEvidenceIdentity(evidence) {
   return evidence ? [
     evidence.source, evidence.jobId, evidence.resultUrl, evidence.model,
-    evidence.status, evidence.aspectRatio
+    evidence.status, evidence.aspectRatio, evidence.mediaType
   ].join('|') : ''
 }
 function midjourneyJobLocation(rawUrl) {
@@ -452,8 +464,13 @@ function providerEvidenceFor(input = {}) {
   if (matching.length !== 1) return null
   const record = matching[0]
   const params = isRecord(record.params) ? record.params : {}
-  const mediaType = ['image', 'video', 'audio', '3d'].includes(record.type)
-    ? record.type
+  const declaredMediaType = typeof record.type === 'string' ? record.type.trim().toLowerCase() : ''
+  const hasDeclaredMediaType = Object.hasOwn(record, 'type') && record.type !== null && record.type !== undefined &&
+    (typeof record.type !== 'string' || declaredMediaType !== '')
+  if (declaredMediaType === '3d') return null
+  if (hasDeclaredMediaType && !['image', 'video', 'audio'].includes(declaredMediaType)) return null
+  const mediaType = hasDeclaredMediaType
+    ? declaredMediaType
     : /\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) ? 'video' : 'image'
   return restoredProviderEvidence({
     source: 'higgsfield-mcp',
@@ -1103,6 +1120,42 @@ function rememberRelayedSelection(requestId) {
   relayedSelectionRequestIds.add(requestId)
   while (relayedSelectionRequestIds.size > 64) relayedSelectionRequestIds.delete(relayedSelectionRequestIds.values().next().value)
 }
+function deliveryEvidenceMatchesProfile(profileId, evidence) {
+  if (profileId === 'midjourney') return evidence?.source === 'midjourney'
+  if (profileId === 'higgsfield-image') {
+    return ['higgsfield-mcp', 'higgsfield-web'].includes(evidence?.source) && evidence.mediaType === 'image'
+  }
+  if (profileId === 'higgsfield-video') {
+    return ['higgsfield-mcp', 'higgsfield-web'].includes(evidence?.source) && evidence.mediaType === 'video'
+  }
+  return false
+}
+
+function handoffReceiptFor(current, candidateId) {
+  const context = current.reviewContext
+  const panel = context && current.browserPanels[context.panelId]
+  const capture = current.capture
+  const evidence = context?.providerEvidence
+  const provider = evidence?.source === 'midjourney' ? 'midjourney'
+    : ['higgsfield-mcp', 'higgsfield-web'].includes(evidence?.source) ? 'higgsfield' : ''
+  const assetKind = provider === 'midjourney' ? 'grid'
+    : ['image', 'video', 'product-shot', 'market-card'].includes(evidence?.mediaType) ? evidence.mediaType : ''
+  if (!context || !panel || !capture || !provider || !assetKind ||
+      context.targetId !== panel.targetId || capture.targetId !== context.targetId ||
+      capture.panelId !== context.panelId || capture.url !== panel.url) return null
+  return {
+    schemaVersion: 1,
+    provider,
+    assetKind,
+    link: { contextId: context.contextId, targetId: context.targetId },
+    capture: { path: capture.path, targetId: capture.targetId },
+    qc: { candidates: CANDIDATE_IDS.map(id => {
+      const candidate = current.candidates[id]
+      return { id: candidate.id, score: candidate.score, disposition: candidate.disposition }
+    }) },
+    select: { candidateId }
+  }
+}
 async function relayPendingSelection(ctx) {
   let request
   try { request = await ctx.rest('/selection-request') } catch { return }
@@ -1118,9 +1171,12 @@ async function relayPendingSelection(ctx) {
   }
   const context = state.reviewContext
   const candidate = state.candidates[request.candidate_id]
-  const valid = reviewContextMatches(state, state.qcProfile) && candidateHasReview(candidate)
-  if (!valid || state.job?.id !== request.run_id) return void await ack({ ok: false, error: 'Desktop review context is absent or stale' })
-  if (state.job.state !== 'QC_RUNNING' && state.job.state !== 'GRID_READY') return void await ack({ ok: false, error: 'Desktop review is not selectable' })
+  const valid = deliveryEvidenceMatchesProfile(state.qcProfile, context?.providerEvidence) &&
+    reviewContextMatches(state, state.qcProfile) && candidateHasReview(candidate)
+  if (!valid || state.job?.id !== request.run_id) return void await ack({ ok: false, error: 'DELIVERY_BLOCKED' })
+  if (state.job.state !== 'QC_RUNNING' && state.job.state !== 'GRID_READY') return void await ack({ ok: false, error: 'DELIVERY_BLOCKED' })
+  const receipt = handoffReceiptFor(state, request.candidate_id)
+  if (!receipt || !verifyHandoffReceipt(receipt).ok) return void await ack({ ok: false, error: 'DELIVERY_BLOCKED' })
   setState({ selectedCandidate: request.candidate_id })
   await ack({ ok: true, candidate_id: request.candidate_id, contextId: context.contextId, revision: request.revision })
 }
@@ -1424,7 +1480,7 @@ async function runHiggsfieldControl(panelId, payload) {
     if (!resultUrl) throw new Error('Observed Higgsfield result URL is invalid')
     const providerEvidence = restoredProviderEvidence({
       source: 'higgsfield-web', jobId: observation.result.providerJobId, status: observation.generationStatus,
-      model: observation.selectedModel, aspectRatio: observation.selectedAspect, resultUrl
+      model: observation.selectedModel, aspectRatio: observation.selectedAspect, mediaType: 'image', resultUrl
     })
     setState(linkPanelState(updatePanelState(state, panelId, {
       url: resultUrl, providerEvidence, qcProfileHint: 'higgsfield-image'

@@ -207,7 +207,7 @@ export function restoredProviderEvidence(value) {
     status: boundedMetadataString(value.status, 64),
     model: boundedMetadataString(value.model, 128),
     soulId: boundedMetadataString(value.soulId, 128),
-    mediaType: ['image', 'video', 'audio', '3d'].includes(value.mediaType) ? value.mediaType : '',
+    mediaType: ['image', 'video', 'audio'].includes(value.mediaType) ? value.mediaType : '',
     prompt: boundedMetadataString(value.prompt),
     width,
     height,
@@ -224,7 +224,7 @@ export function restoredProviderEvidence(value) {
 export function providerEvidenceIdentity(evidence) {
   return evidence ? [
     evidence.source, evidence.jobId, evidence.resultUrl, evidence.model,
-    evidence.status, evidence.aspectRatio
+    evidence.status, evidence.aspectRatio, evidence.mediaType
   ].join('|') : ''
 }
 export function midjourneyJobLocation(rawUrl) {
@@ -263,8 +263,13 @@ export function providerEvidenceFor(input = {}) {
   if (matching.length !== 1) return null
   const record = matching[0]
   const params = isRecord(record.params) ? record.params : {}
-  const mediaType = ['image', 'video', 'audio', '3d'].includes(record.type)
-    ? record.type
+  const declaredMediaType = typeof record.type === 'string' ? record.type.trim().toLowerCase() : ''
+  const hasDeclaredMediaType = Object.hasOwn(record, 'type') && record.type !== null && record.type !== undefined &&
+    (typeof record.type !== 'string' || declaredMediaType !== '')
+  if (declaredMediaType === '3d') return null
+  if (hasDeclaredMediaType && !['image', 'video', 'audio'].includes(declaredMediaType)) return null
+  const mediaType = hasDeclaredMediaType
+    ? declaredMediaType
     : /\.(mp4|mov|webm|mkv|avi)(?:[?#]|$)/i.test(src) ? 'video' : 'image'
   return restoredProviderEvidence({
     source: 'higgsfield-mcp',
@@ -645,6 +650,8 @@ export function migratePersistedState(saved, defaults) {
   const source = isRecord(saved) ? saved : {}
   const legacyUrl = typeof source.browserUrl === 'string' ? source.browserUrl : ''
   const candidates = isRecord(source.candidates) ? source.candidates : {}
+  const unsupported3d = Object.values(source.browserPanels || {}).some(panel => panel?.providerEvidence?.mediaType === '3d') ||
+    source.reviewContext?.providerEvidence?.mediaType === '3d'
   const browserPanels = {
     result: restoredPanel(source.browserPanels?.result, defaults.browserPanels.result, legacyUrl),
     reference: restoredPanel(source.browserPanels?.reference, defaults.browserPanels.reference)
@@ -681,6 +688,15 @@ export function migratePersistedState(saved, defaults) {
     restored.candidates = blankCandidates()
     restored.selectedCandidate = null
     restored.qcJson = ''
+  }
+  if (unsupported3d) {
+    restored.reviewContext = null
+    restored.evaluations = {}
+    restored.job = blankJob()
+    restored.candidates = blankCandidates()
+    restored.selectedCandidate = null
+    restored.qcJson = ''
+    restored.capture = null
   }
   return restored
 }

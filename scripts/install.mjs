@@ -25,6 +25,7 @@ Usage:
   renderline --target PLUGIN_DIRECTORY --skill-target SKILL_DIRECTORY
   renderline --install|--update [--dry-run]
   renderline --verify
+  renderline --verify-installed
   renderline --rollback [--dry-run]
   renderline --uninstall [--force]
 
@@ -35,7 +36,8 @@ Options:
   --uninstall         Remove all managed files
   --install           Install or idempotently repair managed files (default)
   --update            Update managed files through the same transaction
-  --verify            Verify marker and source/install hashes without writing
+  --verify            Verify current seven-file source compatibility without writing
+  --verify-installed  Verify marker and installed managed-file hashes without reading source
   --rollback          Restore the exact newest update transaction
   --dry-run           Print the transaction without writing
   --force             Uninstall even when a managed file was modified
@@ -91,9 +93,9 @@ async function readManagedFile(path) {
   }
 }
 
-function expectedManagedFiles(target, skillTarget, dashboardTarget) {
+function expectedManagedFiles(target, skillTarget, dashboardTarget, schemaVersion = 3) {
   const backendTarget = dirname(dashboardTarget)
-  return [
+  const files = [
     { id: 'plugin', path: join(target, 'plugin.js') },
     { id: 'skill', path: join(skillTarget, 'SKILL.md') },
     { id: 'backend-manifest', path: join(backendTarget, 'plugin.yaml') },
@@ -101,13 +103,17 @@ function expectedManagedFiles(target, skillTarget, dashboardTarget) {
     { id: 'dashboard-manifest', path: join(dashboardTarget, 'manifest.json') },
     { id: 'dashboard-api', path: join(dashboardTarget, 'plugin_api.py') }
   ]
+  if (schemaVersion === 3) files.push({ id: 'handoff-receipt', path: join(target, 'scripts', 'handoff-receipt.mjs') })
+  return files
 }
 
-function validatedMarkerFiles(marker, expected) {
-  if (marker?.sha256 && !marker?.files) {
-    if (!/^[a-f0-9]{64}$/.test(marker.sha256)) throw new Error('Installation marker has an invalid plugin hash')
-    return [{ ...expected[0], sha256: marker.sha256 }]
-  }
+function markerSchemaVersion(marker) {
+  if (![2, 3].includes(marker?.schemaVersion)) throw new Error('Installation marker has an unsupported schema version')
+  return marker.schemaVersion
+}
+
+function validatedMarkerFiles(marker, target, skillTarget, dashboardTarget) {
+  const expected = expectedManagedFiles(target, skillTarget, dashboardTarget, markerSchemaVersion(marker))
   if (!Array.isArray(marker?.files) || marker.files.length !== expected.length) {
     throw new Error('Installation marker has an incomplete managed file list')
   }
@@ -121,6 +127,7 @@ function validatedMarkerFiles(marker, expected) {
     return { ...file, sha256: entry.sha256 }
   })
 }
+
 
 async function uninstall(target, skillTarget, dashboardTarget, options) {
   const markerPath = join(target, MARKER_NAME)
@@ -147,7 +154,7 @@ async function uninstall(target, skillTarget, dashboardTarget, options) {
   if (options.force) {
     files = expected
   } else {
-    files = validatedMarkerFiles(marker, expected)
+    files = validatedMarkerFiles(marker, target, skillTarget, dashboardTarget)
   }
   if (!options.force) {
     for (const file of files) {
@@ -171,7 +178,8 @@ async function install(target, skillTarget, dashboardTarget, dryRun = false) {
   const sourcePaths = {
     plugin: join(PACKAGE_ROOT, 'plugin.js'), skill: join(PACKAGE_ROOT, 'skill', 'SKILL.md'),
     'backend-manifest': join(PACKAGE_ROOT, 'backend', 'plugin.yaml'), 'backend-init': join(PACKAGE_ROOT, 'backend', '__init__.py'),
-    'dashboard-manifest': join(PACKAGE_ROOT, 'dashboard', 'manifest.json'), 'dashboard-api': join(PACKAGE_ROOT, 'dashboard', 'plugin_api.py')
+    'dashboard-manifest': join(PACKAGE_ROOT, 'dashboard', 'manifest.json'), 'dashboard-api': join(PACKAGE_ROOT, 'dashboard', 'plugin_api.py'),
+    'handoff-receipt': join(PACKAGE_ROOT, 'scripts', 'handoff-receipt.mjs')
   }
   const plans = await Promise.all(expectedManagedFiles(target, skillTarget, dashboardTarget).map(async file => {
     const [source, current] = await Promise.all([readFile(sourcePaths[file.id]), readManagedFile(file.path)])
@@ -181,7 +189,7 @@ async function install(target, skillTarget, dashboardTarget, dryRun = false) {
   const markerBefore = await readManagedFile(markerPath)
   let marker
   try { marker = markerBefore && JSON.parse(markerBefore.toString('utf8')) } catch {}
-  const markerChanged = plans.some(file => file.changed) || marker?.schemaVersion !== 2 || marker?.package !== packageJson.name ||
+  const markerChanged = plans.some(file => file.changed) || marker?.schemaVersion !== 3 || marker?.package !== packageJson.name ||
     marker?.version !== packageJson.version || JSON.stringify(marker?.files) !== JSON.stringify(files)
 
   if (dryRun) {
@@ -211,7 +219,7 @@ async function install(target, skillTarget, dashboardTarget, dryRun = false) {
   if (markerChanged) {
     const temp = `${markerPath}.tmp-${stamp}`
     if (markerBefore) operations.push({ type: 'backup', path: markerPath, backup: join(target, 'backups', 'marker', `${MARKER_NAME}-${stamp}.bak`) })
-    operations.push({ type: 'temp', path: temp, value: Buffer.from(`${JSON.stringify({ schemaVersion: 2, installedAt: new Date().toISOString(), package: packageJson.name, version: packageJson.version, files }, null, 2)}\n`) })
+    operations.push({ type: 'temp', path: temp, value: Buffer.from(`${JSON.stringify({ schemaVersion: 3, installedAt: new Date().toISOString(), package: packageJson.name, version: packageJson.version, files }, null, 2)}\n`) })
     operations.push({ type: 'replace', path: markerPath, temp, before: markerBefore })
   }
 
@@ -262,11 +270,13 @@ async function verify(target, skillTarget, dashboardTarget) {
   let marker
   try { marker = JSON.parse(markerBytes.toString('utf8')) } catch { throw new Error('Installation marker is not valid JSON') }
   const expected = expectedManagedFiles(target, skillTarget, dashboardTarget)
-  const marked = validatedMarkerFiles(marker, expected)
+  const marked = validatedMarkerFiles(marker, target, skillTarget, dashboardTarget)
+  if (marker.schemaVersion !== 3) throw new Error('Compatibility error: installed marker uses schema v2. Run renderline --update')
   const sourcePaths = {
     plugin: join(PACKAGE_ROOT, 'plugin.js'), skill: join(PACKAGE_ROOT, 'skill', 'SKILL.md'),
     'backend-manifest': join(PACKAGE_ROOT, 'backend', 'plugin.yaml'), 'backend-init': join(PACKAGE_ROOT, 'backend', '__init__.py'),
-    'dashboard-manifest': join(PACKAGE_ROOT, 'dashboard', 'manifest.json'), 'dashboard-api': join(PACKAGE_ROOT, 'dashboard', 'plugin_api.py')
+    'dashboard-manifest': join(PACKAGE_ROOT, 'dashboard', 'manifest.json'), 'dashboard-api': join(PACKAGE_ROOT, 'dashboard', 'plugin_api.py'),
+    'handoff-receipt': join(PACKAGE_ROOT, 'scripts', 'handoff-receipt.mjs')
   }
   for (const file of expected) {
     const [source, current] = await Promise.all([readFile(sourcePaths[file.id]), readManagedFile(file.path)])
@@ -278,6 +288,21 @@ async function verify(target, skillTarget, dashboardTarget) {
   }
   console.log(`Verified Renderline ${marker.version || 'unknown'} at ${target}`)
 }
+async function verifyInstalled(target, skillTarget, dashboardTarget) {
+  const markerPath = join(target, MARKER_NAME)
+  const markerBytes = await readManagedFile(markerPath)
+  if (!markerBytes) throw new Error(`No managed installation marker at ${markerPath}`)
+  let marker
+  try { marker = JSON.parse(markerBytes.toString('utf8')) } catch { throw new Error('Installation marker is not valid JSON') }
+  for (const file of validatedMarkerFiles(marker, target, skillTarget, dashboardTarget)) {
+    const current = await readManagedFile(file.path)
+    if (!current || sha256(current) !== file.sha256) {
+      throw new Error(`Installed-file verification error: managed file differs from marker: ${file.id}`)
+    }
+  }
+  console.log(`Verified installed Renderline ${marker.version || 'unknown'} at ${target}`)
+}
+
 
 async function rollback(target, skillTarget, dashboardTarget, dryRun = false) {
   const managed = expectedManagedFiles(target, skillTarget, dashboardTarget)
@@ -304,13 +329,7 @@ async function rollback(target, skillTarget, dashboardTarget, dryRun = false) {
   try { previousMarker = JSON.parse(markerBackup.toString('utf8')) } catch {
     throw new Error('Rollback transaction marker backup is not valid JSON')
   }
-  const previousEntries = new Map()
-  for (const entry of Array.isArray(previousMarker?.files) ? previousMarker.files : []) {
-    if (!entry || typeof entry.id !== 'string' || previousEntries.has(entry.id)) {
-      throw new Error('Rollback transaction marker has invalid managed file entries')
-    }
-    previousEntries.set(entry.id, entry)
-  }
+  const previousEntries = new Map(validatedMarkerFiles(previousMarker, target, skillTarget, dashboardTarget).map(entry => [entry.id, entry]))
 
   const actions = []
   for (const file of managed) {
@@ -318,6 +337,13 @@ async function rollback(target, skillTarget, dashboardTarget, dryRun = false) {
     const backupPath = join(target, 'backups', file.id, `${basename(file.path)}-${stamp}.bak`)
     const backup = await readManagedFile(backupPath)
     if (backup) {
+      const previous = previousEntries.get(file.id)
+      if (!previous) {
+        throw new Error(`Rollback transaction marker is missing the prior entry for backed up file: ${file.id}`)
+      }
+      if (sha256(backup) !== previous.sha256) {
+        throw new Error(`Rollback transaction backup does not match the prior marker hash: ${file.id}`)
+      }
       actions.push({ ...file, type: 'restore', backup, current })
       continue
     }
@@ -376,7 +402,7 @@ try {
     const skillTarget = skillDirectory(options)
     const dashboardTarget = dashboardDirectory(options)
     const hermesHome = hermesHomeDirectory(options)
-    const migratedLegacyPaths = await migrateLegacyInstallPaths(hermesHome, target, skillTarget, dashboardTarget, options)
+    const migratedLegacyPaths = options.verifyInstalled ? [] : await migrateLegacyInstallPaths(hermesHome, target, skillTarget, dashboardTarget, options)
     if (migratedLegacyPaths.length) console.log(`Migrated ${migratedLegacyPaths.length} legacy Renderline path(s)`)
     const destinations = [
       target, skillTarget, dashboardTarget,
@@ -384,10 +410,12 @@ try {
       ...expectedManagedFiles(target, skillTarget, dashboardTarget).map(file => file.path)
     ]
     for (const destination of destinations) await assertSafeDestination(hermesHome, destination)
-    const managesLiveSidecar = !options.hermesHome && !options.target && !options.dryRun
+    const managesLiveSidecar = !options.hermesHome && !options.target && !options.dryRun && !options.verifyInstalled
     if (options.uninstall) {
       await uninstall(target, skillTarget, dashboardTarget, options)
       if (managesLiveSidecar) runSidecar('uninstall')
+    } else if (options.verifyInstalled) {
+      await verifyInstalled(target, skillTarget, dashboardTarget)
     } else if (options.verify) {
       await verify(target, skillTarget, dashboardTarget)
       if (managesLiveSidecar) runSidecar('verify')
